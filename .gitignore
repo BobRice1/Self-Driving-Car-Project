@@ -32,8 +32,12 @@ Thumbs.db
 
 # Project outputs
 outputs/checkpoints/
-outputs/logs/
-outputs/submissions/
+outputs/logs/*
+!outputs/logs/.gitkeep
+!outputs/logs/*.csv
+outputs/submissions/*
+!outputs/submissions/.gitkeep
+!outputs/submissions/*.csv
 
 # Dataset images (large, local-only)
 data/training_data/
