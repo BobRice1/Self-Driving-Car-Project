@@ -1,0 +1,28 @@
+experiment:
+  run_name: convnext_tiny_320x240
+
+model:
+  backbone: convnext_tiny
+  pretrained: true
+  hidden_dim: 256
+  dropout: 0.2
+
+data:
+  width: 320
+  height: 240
+  batch_size: 48
+  val_batch_size: 96
+  num_workers: 4
+  hflip_p: 0.2
+
+training:
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_epochs: 1
+  mixed_precision: true
+  early_stopping_patience: 4
+  grad_clip_norm: 1.0
+  angle_loss_weight: 2.5
+  speed_loss_weight: 1.0
+  angle_sample_weight_alpha: 3.0
