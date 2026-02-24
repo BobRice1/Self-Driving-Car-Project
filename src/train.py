@@ -16,16 +16,22 @@ try:
     from .cv import blocked_kfold_split
     from .dataset import DrivingDataset
     from .losses import weighted_mse_loss
-    from .model import SelfDrivingRegressor
+    from .model import (
+        MODEL_IMPLEMENTATION_VERSION,
+        SelfDrivingRegressor,
+        get_architecture_change_log,
+    )
     from .paths import resolve_data_paths, resolve_image_file
     from .transforms import build_train_transforms, build_valid_transforms
     from .utils import (
+        build_run_manifest,
         build_run_name,
         create_warmup_cosine_scheduler,
         ensure_dir,
         load_yaml,
         resolve_runtime_device,
         save_checkpoint,
+        save_json,
         save_yaml,
         set_seed,
     )
@@ -169,7 +175,7 @@ def train_one_epoch(
     model.train()
     train_cfg = config["training"]
 
-    running = {"loss": 0.0, "mse_angle": 0.0, "mse_speed": 0.0}
+    running = {"loss": 0.0, "kaggle_mse": 0.0, "mse_angle": 0.0, "mse_speed": 0.0, "speed_bce": 0.0}
     seen = 0
 
     for images, targets in tqdm(loader, desc="train", leave=False):
@@ -184,11 +190,17 @@ def train_one_epoch(
             loss_dict = weighted_mse_loss(
                 angle_pred=outputs["angle_pred"],
                 speed_pred=outputs["speed_pred"],
+                speed_logit=outputs["speed_logit"],
                 angle_true=angle_true,
                 speed_true=speed_true,
-                angle_loss_weight=float(train_cfg.get("angle_loss_weight", 2.5)),
+                angle_loss_weight=float(train_cfg.get("angle_loss_weight", 1.0)),
                 speed_loss_weight=float(train_cfg.get("speed_loss_weight", 1.0)),
                 angle_sample_weight_alpha=float(train_cfg.get("angle_sample_weight_alpha", 0.0)),
+                speed_loss_type=str(train_cfg.get("speed_loss_type", "mse")),
+                speed_pos_weight=float(train_cfg.get("speed_pos_weight", 1.0)),
+                speed_neg_weight=float(train_cfg.get("speed_neg_weight", 1.0)),
+                speed_bce_weight=float(train_cfg.get("speed_bce_weight", 1.0)),
+                speed_mse_weight=float(train_cfg.get("speed_mse_weight", 0.0)),
             )
             loss = loss_dict["loss"]
 
@@ -205,11 +217,13 @@ def train_one_epoch(
 
         seen += batch_size
         running["loss"] += float(loss_dict["loss"].detach().item()) * batch_size
+        running["kaggle_mse"] += float(loss_dict["kaggle_mse"].detach().item()) * batch_size
         running["mse_angle"] += float(loss_dict["mse_angle"].detach().item()) * batch_size
         running["mse_speed"] += float(loss_dict["mse_speed"].detach().item()) * batch_size
+        running["speed_bce"] += float(loss_dict["speed_bce"].detach().item()) * batch_size
 
     if seen == 0:
-        return {"loss": 0.0, "mse_angle": 0.0, "mse_speed": 0.0}
+        return {"loss": 0.0, "kaggle_mse": 0.0, "mse_angle": 0.0, "mse_speed": 0.0, "speed_bce": 0.0}
     return {k: v / seen for k, v in running.items()}
 
 
@@ -224,7 +238,7 @@ def validate_one_epoch(
     model.eval()
     train_cfg = config["training"]
 
-    running = {"loss": 0.0, "mse_angle": 0.0, "mse_speed": 0.0}
+    running = {"loss": 0.0, "kaggle_mse": 0.0, "mse_angle": 0.0, "mse_speed": 0.0, "speed_bce": 0.0}
     seen = 0
 
     for images, targets in tqdm(loader, desc="valid", leave=False):
@@ -238,20 +252,28 @@ def validate_one_epoch(
             loss_dict = weighted_mse_loss(
                 angle_pred=outputs["angle_pred"],
                 speed_pred=outputs["speed_pred"],
+                speed_logit=outputs["speed_logit"],
                 angle_true=angle_true,
                 speed_true=speed_true,
-                angle_loss_weight=float(train_cfg.get("angle_loss_weight", 2.5)),
+                angle_loss_weight=float(train_cfg.get("angle_loss_weight", 1.0)),
                 speed_loss_weight=float(train_cfg.get("speed_loss_weight", 1.0)),
                 angle_sample_weight_alpha=float(train_cfg.get("angle_sample_weight_alpha", 0.0)),
+                speed_loss_type=str(train_cfg.get("speed_loss_type", "mse")),
+                speed_pos_weight=float(train_cfg.get("speed_pos_weight", 1.0)),
+                speed_neg_weight=float(train_cfg.get("speed_neg_weight", 1.0)),
+                speed_bce_weight=float(train_cfg.get("speed_bce_weight", 1.0)),
+                speed_mse_weight=float(train_cfg.get("speed_mse_weight", 0.0)),
             )
 
         seen += batch_size
         running["loss"] += float(loss_dict["loss"].detach().item()) * batch_size
+        running["kaggle_mse"] += float(loss_dict["kaggle_mse"].detach().item()) * batch_size
         running["mse_angle"] += float(loss_dict["mse_angle"].detach().item()) * batch_size
         running["mse_speed"] += float(loss_dict["mse_speed"].detach().item()) * batch_size
+        running["speed_bce"] += float(loss_dict["speed_bce"].detach().item()) * batch_size
 
     if seen == 0:
-        return {"loss": 0.0, "mse_angle": 0.0, "mse_speed": 0.0}
+        return {"loss": 0.0, "kaggle_mse": 0.0, "mse_angle": 0.0, "mse_speed": 0.0, "speed_bce": 0.0}
     return {k: v / seen for k, v in running.items()}
 
 
@@ -288,6 +310,18 @@ def main() -> None:
 
     config_dump_path = ckpt_dir / "config_used.yaml"
     save_yaml(config, config_dump_path)
+    run_manifest = build_run_manifest(
+        run_name=run_name,
+        config=config,
+        implementation_version=MODEL_IMPLEMENTATION_VERSION,
+        architecture_change_log=get_architecture_change_log(),
+    )
+    run_manifest_path = ckpt_dir / "run_manifest.json"
+    save_json(run_manifest, run_manifest_path)
+    save_json(run_manifest, log_dir / f"{run_name}_run_manifest.json")
+    architecture_log_text = "\n".join(f"- {line}" for line in run_manifest["architecture_changes"])
+    (ckpt_dir / "architecture_changes.txt").write_text(architecture_log_text + "\n", encoding="utf-8")
+    (log_dir / f"{run_name}_architecture_changes.txt").write_text(architecture_log_text + "\n", encoding="utf-8")
 
     device, gpu_ids, use_data_parallel = resolve_runtime_device(
         device_mode=args.device,
@@ -299,6 +333,8 @@ def main() -> None:
 
     all_logs: List[Dict[str, Any]] = []
     print(f"Run: {run_name}")
+    print(f"Implementation ID: {run_manifest['implementation_id']}")
+    print(f"Implementation version: {run_manifest['implementation_version']}")
     print(f"Train CSV: {data_paths.train_csv}")
     print(f"Train images dir: {data_paths.train_images_dir}")
     print(f"Device: {device}, AMP: {use_amp}, multi_gpu={args.multi_gpu}, use_data_parallel={use_data_parallel}")
@@ -354,6 +390,13 @@ def main() -> None:
 
         best_val = float("inf")
         patience = int(train_cfg.get("early_stopping_patience", 5))
+        select_metric = str(train_cfg.get("model_selection_metric", "kaggle_mse")).strip().lower()
+        valid_selection_metrics = {"loss", "kaggle_mse", "mse_angle", "mse_speed", "speed_bce"}
+        if select_metric not in valid_selection_metrics:
+            raise ValueError(
+                f"Unsupported model_selection_metric='{select_metric}'. "
+                f"Choose one of: {sorted(valid_selection_metrics)}"
+            )
         bad_epochs = 0
         fold_ckpt_path = ckpt_dir / f"fold_{fold_idx}.pt"
 
@@ -380,29 +423,38 @@ def main() -> None:
                 "run_name": run_name,
                 "fold": fold_idx,
                 "epoch": epoch,
+                "implementation_id": run_manifest["implementation_id"],
+                "implementation_version": run_manifest["implementation_version"],
                 "train_mse_total": train_metrics["loss"],
+                "train_kaggle_mse": train_metrics["kaggle_mse"],
                 "train_mse_angle": train_metrics["mse_angle"],
                 "train_mse_speed": train_metrics["mse_speed"],
+                "train_speed_bce": train_metrics["speed_bce"],
                 "val_mse_total": valid_metrics["loss"],
+                "val_kaggle_mse": valid_metrics["kaggle_mse"],
                 "val_mse_angle": valid_metrics["mse_angle"],
                 "val_mse_speed": valid_metrics["mse_speed"],
+                "val_speed_bce": valid_metrics["speed_bce"],
                 "lr": optimizer.param_groups[0]["lr"],
+                "selection_metric": select_metric,
+                "selection_value": valid_metrics[select_metric],
             }
             all_logs.append(row)
 
             print(
                 "epoch={epoch:03d} "
-                "train_total={train_total:.6f} val_total={val_total:.6f} "
-                "val_angle={val_angle:.6f} val_speed={val_speed:.6f}".format(
+                "train_loss={train_total:.6f} val_loss={val_total:.6f} "
+                "val_kaggle={val_kaggle:.6f} val_angle={val_angle:.6f} val_speed={val_speed:.6f}".format(
                     epoch=epoch,
                     train_total=train_metrics["loss"],
                     val_total=valid_metrics["loss"],
+                    val_kaggle=valid_metrics["kaggle_mse"],
                     val_angle=valid_metrics["mse_angle"],
                     val_speed=valid_metrics["mse_speed"],
                 )
             )
 
-            current_val = valid_metrics["loss"]
+            current_val = valid_metrics[select_metric]
             if current_val < best_val:
                 best_val = current_val
                 bad_epochs = 0
@@ -415,8 +467,9 @@ def main() -> None:
                     best_score=best_val,
                     fold=fold_idx,
                     config=config,
+                    run_manifest=run_manifest,
                 )
-                print(f"Saved best checkpoint: {fold_ckpt_path}")
+                print(f"Saved best checkpoint ({select_metric}={best_val:.6f}): {fold_ckpt_path}")
             else:
                 bad_epochs += 1
                 if bad_epochs >= patience:

@@ -1,8 +1,21 @@
-from typing import Dict
+from typing import Dict, List
 
 import timm
 import torch
 import torch.nn as nn
+
+
+MODEL_IMPLEMENTATION_VERSION = "v2.1.0"
+
+
+def get_architecture_change_log() -> List[str]:
+    return [
+        "Baseline architecture retained: timm backbone + shared MLP + 17-bin angle head + 1-logit speed head.",
+        "Speed supervision upgraded to hybrid BCE-with-logits plus MSE in training for better binary speed calibration.",
+        "Model selection metric switched to Kaggle-aligned unweighted MSE: 0.5 * (angle_mse + speed_mse).",
+        "Inference supports horizontal-flip TTA with angle correction: angle = 1 - angle_flipped.",
+        "Run and submission manifests include implementation version and architecture change log for traceability.",
+    ]
 
 
 class SelfDrivingRegressor(nn.Module):
@@ -55,4 +68,3 @@ class SelfDrivingRegressor(nn.Module):
             "angle_pred": angle_pred,
             "speed_pred": speed_pred,
         }
-

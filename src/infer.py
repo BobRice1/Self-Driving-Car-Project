@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 IMPORT_ERROR = None
 try:
@@ -13,10 +13,16 @@ try:
     from tqdm import tqdm
 
     from .dataset import DrivingDataset
-    from .model import SelfDrivingRegressor
+    from .model import MODEL_IMPLEMENTATION_VERSION, SelfDrivingRegressor, get_architecture_change_log
     from .paths import resolve_data_paths
     from .transforms import build_valid_transforms
-    from .utils import ensure_dir, load_model_state_dict_flexible, load_yaml, resolve_runtime_device
+    from .utils import (
+        ensure_dir,
+        load_model_state_dict_flexible,
+        load_yaml,
+        resolve_runtime_device,
+        save_json,
+    )
 except ModuleNotFoundError as exc:
     IMPORT_ERROR = exc
 
@@ -30,6 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True, help="Output submission CSV path.")
     parser.add_argument("--batch_size", type=int, default=None, help="Optional batch size override.")
     parser.add_argument("--num_workers", type=int, default=None, help="Optional DataLoader worker override.")
+    parser.add_argument(
+        "--tta",
+        type=str,
+        default="hflip",
+        choices=["none", "hflip"],
+        help="Inference-time augmentation mode.",
+    )
     parser.add_argument("--disable_amp", action="store_true", help="Disable mixed precision.")
     parser.add_argument(
         "--device",
@@ -59,6 +72,7 @@ def predict_fold(
     loader: DataLoader,
     device: torch.device,
     use_amp: bool,
+    tta_mode: str,
 ) -> Dict[str, np.ndarray]:
     model.eval()
     angle_pred = []
@@ -69,12 +83,54 @@ def predict_fold(
             images = images.to(device, non_blocking=True)
             with torch.amp.autocast(device_type="cuda", enabled=use_amp):
                 outputs = model(images)
-            angle_pred.append(outputs["angle_pred"].detach().cpu().numpy())
-            speed_pred.append(outputs["speed_pred"].detach().cpu().numpy())
+                angle = outputs["angle_pred"]
+                speed = outputs["speed_pred"]
+
+                if tta_mode == "hflip":
+                    flipped_images = torch.flip(images, dims=[3])
+                    flipped_outputs = model(flipped_images)
+                    angle_flipped = 1.0 - flipped_outputs["angle_pred"]
+                    speed_flipped = flipped_outputs["speed_pred"]
+                    angle = 0.5 * (angle + angle_flipped)
+                    speed = 0.5 * (speed + speed_flipped)
+
+            angle_pred.append(angle.detach().cpu().numpy())
+            speed_pred.append(speed.detach().cpu().numpy())
 
     return {
         "angle": np.concatenate(angle_pred).astype(np.float32),
         "speed": np.concatenate(speed_pred).astype(np.float32),
+    }
+
+
+def build_submission_manifest(
+    out_path: Path,
+    config: Dict[str, Any],
+    ckpt_dir: Path,
+    kfold: int,
+    tta_mode: str,
+    run_manifest: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    config_for_manifest = dict(config)
+    return {
+        "created_for_submission": out_path.name,
+        "submission_path": str(out_path),
+        "checkpoint_dir": str(ckpt_dir),
+        "kfold": int(kfold),
+        "tta_mode": tta_mode,
+        "implementation_version": (
+            run_manifest.get("implementation_version")
+            if run_manifest is not None
+            else MODEL_IMPLEMENTATION_VERSION
+        ),
+        "implementation_id": run_manifest.get("implementation_id") if run_manifest is not None else "unknown",
+        "architecture_changes": (
+            run_manifest.get("architecture_changes")
+            if run_manifest is not None
+            else get_architecture_change_log()
+        ),
+        "run_manifest_from_checkpoint": run_manifest is not None,
+        "config": config_for_manifest,
     }
 
 
@@ -120,10 +176,14 @@ def main() -> None:
 
     pred_angle = np.zeros(len(test_ds), dtype=np.float32)
     pred_speed = np.zeros(len(test_ds), dtype=np.float32)
+    run_manifest = None
 
     print(f"Sample CSV: {data_paths.sample_submission_csv}")
     print(f"Test images dir: {data_paths.test_images_dir}")
-    print(f"Device: {device}, AMP: {use_amp}, multi_gpu={args.multi_gpu}, use_data_parallel={use_data_parallel}")
+    print(
+        f"Device: {device}, AMP: {use_amp}, TTA: {args.tta}, "
+        f"multi_gpu={args.multi_gpu}, use_data_parallel={use_data_parallel}"
+    )
     if device.type == "cuda":
         gpu_names = [f"{gid}:{torch.cuda.get_device_name(gid)}" for gid in gpu_ids]
         print(f"Selected CUDA GPUs: {gpu_names}")
@@ -147,13 +207,21 @@ def main() -> None:
         ).to(device)
 
         checkpoint = torch.load(ckpt_path, map_location=device)
+        if run_manifest is None and isinstance(checkpoint, dict):
+            run_manifest = checkpoint.get("run_manifest")
         load_model_state_dict_flexible(raw_model, checkpoint["model_state_dict"])
         model = raw_model
         if use_data_parallel:
             model = torch.nn.DataParallel(raw_model, device_ids=gpu_ids, output_device=gpu_ids[0])
 
         print(f"Loaded fold {fold}: {ckpt_path}")
-        fold_preds = predict_fold(model=model, loader=test_loader, device=device, use_amp=use_amp)
+        fold_preds = predict_fold(
+            model=model,
+            loader=test_loader,
+            device=device,
+            use_amp=use_amp,
+            tta_mode=args.tta,
+        )
         pred_angle += fold_preds["angle"]
         pred_speed += fold_preds["speed"]
 
@@ -167,6 +235,18 @@ def main() -> None:
     ensure_dir(args.out.parent)
     submission.to_csv(args.out, index=False)
     print(f"Submission written: {args.out}")
+
+    submission_manifest = build_submission_manifest(
+        out_path=args.out,
+        config=config,
+        ckpt_dir=args.ckpt_dir,
+        kfold=args.kfold,
+        tta_mode=args.tta,
+        run_manifest=run_manifest,
+    )
+    manifest_path = args.out.parent / f"{args.out.stem}_manifest.json"
+    save_json(submission_manifest, manifest_path)
+    print(f"Submission manifest: {manifest_path}")
 
 
 if __name__ == "__main__":

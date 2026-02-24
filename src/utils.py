@@ -1,5 +1,8 @@
 import math
 import random
+import hashlib
+import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +22,12 @@ def save_yaml(data: Dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False)
+
+
+def save_json(data: Dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
 
 
 def ensure_dir(path: Path) -> None:
@@ -62,6 +71,78 @@ def build_run_name(config: Dict[str, Any], override: Optional[str] = None) -> st
     return f"{base}_{ts}"
 
 
+def _stable_hash_obj(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def get_git_info(cwd: Optional[Path] = None) -> Dict[str, Any]:
+    repo_cwd = cwd if cwd is not None else Path.cwd()
+    info = {
+        "commit": "unknown",
+        "branch": "unknown",
+        "is_dirty": None,
+    }
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if commit:
+            info["commit"] = commit
+    except Exception:
+        pass
+
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if branch:
+            info["branch"] = branch
+    except Exception:
+        pass
+
+    try:
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=repo_cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        info["is_dirty"] = bool(status.strip())
+    except Exception:
+        pass
+
+    return info
+
+
+def build_run_manifest(
+    run_name: str,
+    config: Dict[str, Any],
+    implementation_version: str,
+    architecture_change_log: List[str],
+) -> Dict[str, Any]:
+    config_hash = _stable_hash_obj(config)
+    architecture_hash = _stable_hash_obj(architecture_change_log)
+    return {
+        "run_name": run_name,
+        "created_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "implementation_version": implementation_version,
+        "config_hash": config_hash,
+        "architecture_log_hash": architecture_hash,
+        "implementation_id": f"{implementation_version}-{config_hash[:6]}-{architecture_hash[:6]}",
+        "architecture_changes": architecture_change_log,
+        "config": config,
+        "git": get_git_info(),
+    }
+
+
 def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -71,6 +152,7 @@ def save_checkpoint(
     best_score: float,
     fold: int,
     config: Dict[str, Any],
+    run_manifest: Optional[Dict[str, Any]] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     model_to_save = model.module if hasattr(model, "module") else model
@@ -83,6 +165,7 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "config": config,
+            "run_manifest": run_manifest,
         },
         path,
     )
