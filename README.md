@@ -100,6 +100,30 @@ Inference behavior:
 - averages fold predictions
 - clamps `angle` and `speed` to `[0, 1]`
 
+## Seed Sweep Automation
+
+To train several seeds sequentially, rank them by mean best-fold `val_kaggle_mse`, run inference for the top seeds, and write blend CSVs in one unattended run:
+
+```bash
+python -m src.seed_sweep --config configs/ablation_loss_plus_select.yaml --seeds 42 1337 2026 31415 777 --kfold 5 --data_dir data --out_dir outputs --run_prefix ablation_loss_plus_select --top_n 3 --tta hflip
+```
+
+This writes:
+- training logs under `outputs/logs`
+- checkpoints under `outputs/checkpoints/<run_name>`
+- top-seed submissions under `outputs/submissions`
+- blend CSVs for the top 2 and top 3 inferred runs
+- a summary JSON at `outputs/submissions/seed_sweep_summary.json`
+
+Useful options:
+- `--skip_train` to rank and infer existing runs only
+- `--skip_infer` to train/rank without writing submissions
+- `--device auto|cuda|cpu`
+- `--multi_gpu auto|off|dp`
+- `--gpu_ids 0,1`
+- `--num_workers 4`
+- `--batch_size 128`
+
 ## Outputs
 
 - checkpoints:
