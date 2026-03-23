@@ -1,0 +1,35 @@
+experiment:
+  run_name: effnetv2s_320x240_ablation_loss_plus_select
+
+model:
+  backbone: tf_efficientnetv2_s
+  pretrained: true
+  hidden_dim: 256
+  dropout: 0.2
+
+data:
+  width: 320
+  height: 240
+  batch_size: 64
+  val_batch_size: 128
+  num_workers: 4
+  hflip_p: 0.2
+
+training:
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_epochs: 1
+  mixed_precision: true
+  early_stopping_patience: 4
+  grad_clip_norm: 1.0
+  model_selection_metric: kaggle_mse
+  # New loss recipe.
+  angle_loss_weight: 1.25
+  speed_loss_weight: 1.0
+  angle_sample_weight_alpha: 1.5
+  speed_loss_type: bce_mse
+  speed_pos_weight: 1.0
+  speed_neg_weight: 3.9
+  speed_bce_weight: 1.0
+  speed_mse_weight: 0.2
