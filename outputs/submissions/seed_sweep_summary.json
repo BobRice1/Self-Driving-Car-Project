@@ -1,0 +1,123 @@
+{
+  "blend_csvs": {
+    "ablation_loss_plus_select_seed1337,ablation_loss_plus_select_seed2026": "/home/lpxrr2/Self-Driving-Car-Project/outputs/submissions/blend_top2_ablation_loss_plus_select_tta_hflip.csv",
+    "ablation_loss_plus_select_seed1337,ablation_loss_plus_select_seed2026,ablation_loss_plus_select_seed777": "/home/lpxrr2/Self-Driving-Car-Project/outputs/submissions/blend_top3_ablation_loss_plus_select_tta_hflip.csv"
+  },
+  "config": "/home/lpxrr2/Self-Driving-Car-Project/configs/ablation_loss_plus_select.yaml",
+  "ranked_runs": [
+    {
+      "fold_best_epoch": {
+        "0": 10,
+        "1": 11,
+        "2": 13,
+        "3": 15,
+        "4": 14
+      },
+      "fold_best_val_kaggle_mse": {
+        "0": 0.0122072963739383,
+        "1": 0.0126072007872689,
+        "2": 0.0119562159448753,
+        "3": 0.0114019066198976,
+        "4": 0.0120706242445716
+      },
+      "log_path": "/home/lpxrr2/Self-Driving-Car-Project/outputs/logs/ablation_loss_plus_select_seed1337_train_log.csv",
+      "mean_best_fold_val_kaggle_mse": 0.01204864879411034,
+      "run_name": "ablation_loss_plus_select_seed1337"
+    },
+    {
+      "fold_best_epoch": {
+        "0": 12,
+        "1": 17,
+        "2": 16,
+        "3": 12,
+        "4": 9
+      },
+      "fold_best_val_kaggle_mse": {
+        "0": 0.0114967669834579,
+        "1": 0.0125781650291441,
+        "2": 0.0122398789683962,
+        "3": 0.0112531611732154,
+        "4": 0.0135468244617377
+      },
+      "log_path": "/home/lpxrr2/Self-Driving-Car-Project/outputs/logs/ablation_loss_plus_select_seed2026_train_log.csv",
+      "mean_best_fold_val_kaggle_mse": 0.012222959323190261,
+      "run_name": "ablation_loss_plus_select_seed2026"
+    },
+    {
+      "fold_best_epoch": {
+        "0": 13,
+        "1": 17,
+        "2": 14,
+        "3": 13,
+        "4": 14
+      },
+      "fold_best_val_kaggle_mse": {
+        "0": 0.0121655807305006,
+        "1": 0.0123591655247019,
+        "2": 0.0128395963669973,
+        "3": 0.011596733166011,
+        "4": 0.0129485439401643
+      },
+      "log_path": "/home/lpxrr2/Self-Driving-Car-Project/outputs/logs/ablation_loss_plus_select_seed777_train_log.csv",
+      "mean_best_fold_val_kaggle_mse": 0.01238192394567502,
+      "run_name": "ablation_loss_plus_select_seed777"
+    },
+    {
+      "fold_best_epoch": {
+        "0": 14,
+        "1": 7,
+        "2": 13,
+        "3": 15,
+        "4": 16
+      },
+      "fold_best_val_kaggle_mse": {
+        "0": 0.0121240103270937,
+        "1": 0.0133165943050782,
+        "2": 0.0130274099559058,
+        "3": 0.0106628260112811,
+        "4": 0.0128706531296063
+      },
+      "log_path": "/home/lpxrr2/Self-Driving-Car-Project/outputs/logs/ablation_loss_plus_select_seed31415_train_log.csv",
+      "mean_best_fold_val_kaggle_mse": 0.01240029874579302,
+      "run_name": "ablation_loss_plus_select_seed31415"
+    },
+    {
+      "fold_best_epoch": {
+        "0": 14,
+        "1": 3,
+        "2": 13,
+        "3": 16,
+        "4": 16
+      },
+      "fold_best_val_kaggle_mse": {
+        "0": 0.0117550767572298,
+        "1": 0.0154302350556504,
+        "2": 0.0127929498829649,
+        "3": 0.0122267847805593,
+        "4": 0.0124279557842559
+      },
+      "log_path": "/home/lpxrr2/Self-Driving-Car-Project/outputs/logs/ablation_loss_plus_select_seed42_train_log.csv",
+      "mean_best_fold_val_kaggle_mse": 0.012926600452132059,
+      "run_name": "ablation_loss_plus_select_seed42"
+    }
+  ],
+  "run_prefix": "ablation_loss_plus_select",
+  "seeds": [
+    42,
+    1337,
+    2026,
+    31415,
+    777
+  ],
+  "submission_csvs": {
+    "ablation_loss_plus_select_seed1337": "/home/lpxrr2/Self-Driving-Car-Project/outputs/submissions/ablation_loss_plus_select_seed1337_tta_hflip.csv",
+    "ablation_loss_plus_select_seed2026": "/home/lpxrr2/Self-Driving-Car-Project/outputs/submissions/ablation_loss_plus_select_seed2026_tta_hflip.csv",
+    "ablation_loss_plus_select_seed777": "/home/lpxrr2/Self-Driving-Car-Project/outputs/submissions/ablation_loss_plus_select_seed777_tta_hflip.csv"
+  },
+  "top_runs": [
+    "ablation_loss_plus_select_seed1337",
+    "ablation_loss_plus_select_seed2026",
+    "ablation_loss_plus_select_seed777"
+  ],
+  "tta": "hflip"
+}
