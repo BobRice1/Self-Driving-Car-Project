@@ -7,12 +7,15 @@ Run this on the Pi from the same folder as model.py:
 Then open:
     http://<pi-ip-address>:8081
 
-This does not drive the car. It only opens the camera, runs model.predict_debug()
-on each frame, and streams the overlay to a browser.
+By default this does not drive the car. With --enable-control it also exposes
+manual steering/speed buttons in the browser.
 """
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -32,7 +35,77 @@ latest_lock = threading.Lock()
 capture_enabled = False
 capture_lock = threading.Lock()
 stop_event = threading.Event()
-CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
+manual_control = None
+CAPTURE_DIR = Path(
+    os.environ.get("PICAR_CAPTURE_DIR", Path(__file__).resolve().parent / "captures")
+).expanduser()
+
+
+class ManualCarControl:
+    def __init__(self, enabled: bool, config_file: Optional[str], control_path: Optional[str]) -> None:
+        self.enabled = False
+        self.status = "disabled"
+        self.lock = threading.Lock()
+        self.fw = None
+        self.bw = None
+        self.angle = 90
+        self.speed = 0
+        self.min_angle = 45
+        self.max_angle = 135
+        self.straight_angle = 90
+
+        if not enabled:
+            return
+
+        try:
+            if control_path:
+                sys.path.insert(0, control_path)
+            import picar
+            from picar import back_wheels, front_wheels
+
+            picar.setup()
+            kwargs = {"debug": False}
+            if config_file:
+                kwargs["db"] = config_file
+            self.fw = front_wheels.Front_Wheels(**kwargs)
+            self.bw = back_wheels.Back_Wheels(**kwargs)
+            self.bw.ready()
+            self.fw.ready()
+            self.straight_angle = int(getattr(self.fw, "_straight_angle", 90))
+            self.min_angle = int(getattr(self.fw, "_min_angle", 45))
+            self.max_angle = int(getattr(self.fw, "_max_angle", 135))
+            self.angle = self.straight_angle
+            self.enabled = True
+            self.status = "ready"
+        except Exception as exc:
+            self.status = f"unavailable: {exc}"
+            self.enabled = False
+
+    def command(self, angle: Optional[int] = None, speed: Optional[int] = None) -> str:
+        if not self.enabled or self.fw is None or self.bw is None:
+            return f"control {self.status}"
+        with self.lock:
+            if angle is not None:
+                self.angle = max(self.min_angle, min(self.max_angle, int(angle)))
+                self.fw.turn(self.angle)
+            if speed is not None:
+                self.speed = max(-100, min(100, int(speed)))
+                if self.speed < 0:
+                    self.bw.backward()
+                    self.bw.speed = abs(self.speed)
+                elif self.speed == 0:
+                    self.bw.stop()
+                else:
+                    self.bw.forward()
+                    self.bw.speed = self.speed
+            return f"angle={self.angle} speed={self.speed}"
+
+    def stop(self) -> None:
+        if not self.enabled or self.bw is None:
+            return
+        with self.lock:
+            self.speed = 0
+            self.bw.stop()
 
 
 def _put_text(image, text: str, xy: tuple[int, int], scale: float = 0.5, color=(235, 235, 235), thickness: int = 1) -> None:
@@ -55,6 +128,23 @@ def _draw_badge(panel, text: str, x: int, y: int, color) -> None:
     cv2.rectangle(panel, (x, y - 17), (x + tw + 16, y + 7), color, -1)
     cv2.rectangle(panel, (x, y - 17), (x + tw + 16, y + 7), (245, 245, 245), 1)
     _put_text(panel, text, (x + 8, y), 0.48, (255, 255, 255), 1)
+
+
+def _preview_panel(image: np.ndarray, title: str, width: int, height: int) -> np.ndarray:
+    panel = np.zeros((height, width, 3), dtype=np.uint8)
+    panel[:] = (18, 20, 24)
+    if image.size > 0:
+        ih, iw = image.shape[:2]
+        scale = min(width / max(iw, 1), (height - 26) / max(ih, 1))
+        new_w = max(1, int(iw * scale))
+        new_h = max(1, int(ih * scale))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        x = (width - new_w) // 2
+        y = 26 + (height - 26 - new_h) // 2
+        panel[y:y + new_h, x:x + new_w] = resized
+    cv2.rectangle(panel, (0, 0), (width - 1, height - 1), (72, 78, 88), 1)
+    _put_text(panel, title, (8, 18), 0.5, (255, 255, 255), 1)
+    return panel
 
 
 def _build_status_panel(debug: dict, width: int = 640, height: int = 210):
@@ -156,7 +246,9 @@ def _draw_debug(frame, debug: dict, runtime: car_model.Model):
     mask_full[safety_y:, :] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
     _draw_badge(mask_full, "OPENCV MASK", 8, 22, (80, 80, 80))
 
-    top = cv2.hconcat([overlay, mask_full])
+    arrow_image, _ = runtime._arrow_input_image(frame)
+    arrow_panel = _preview_panel(arrow_image, f"Arrow input: {car_model.ARROW_INPUT_MODE}", overlay.shape[1], overlay.shape[0])
+    top = cv2.hconcat([overlay, mask_full, arrow_panel])
     panel = _build_status_panel(debug, width=top.shape[1], height=210)
     return cv2.vconcat([top, panel])
 
@@ -174,6 +266,10 @@ def _save_capture_images(capture: dict[str, np.ndarray]) -> list[str]:
 
 def _capture_loop(args: argparse.Namespace) -> None:
     global latest_jpeg, latest_capture
+
+    # The standalone debug script owns the web server. Disable model.py's
+    # built-in stream so --port controls the only server this process starts.
+    car_model.ENABLE_DEBUG_STREAM = False
 
     cap = cv2.VideoCapture(args.camera)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
@@ -252,24 +348,65 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/capture_toggle":
             self._toggle_capture()
             return
+        if self.path == "/control":
+            self._control()
+            return
         self.send_error(404)
+
+    def _control(self) -> None:
+        global manual_control
+        if manual_control is None:
+            self._write_text(503, "control unavailable")
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8") if length else "{}")
+        except json.JSONDecodeError:
+            self._write_text(400, "invalid json")
+            return
+        if payload.get("stop"):
+            manual_control.stop()
+            self._write_text(200, "stopped")
+            return
+        angle = payload.get("angle")
+        speed = payload.get("speed")
+        self._write_text(200, manual_control.command(angle=angle, speed=speed))
 
     def do_GET(self) -> None:
         if self.path in ("/", "/index.html"):
+            control_status = manual_control.status if manual_control is not None else "disabled"
+            control_enabled = bool(manual_control is not None and manual_control.enabled)
+            straight_angle = manual_control.straight_angle if manual_control is not None else 90
+            min_angle = manual_control.min_angle if manual_control is not None else 45
+            max_angle = manual_control.max_angle if manual_control is not None else 135
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(
-                b"""<!doctype html>
+            html = f"""<!doctype html>
 <html>
 <head><title>PiCar Model Debug</title></head>
 <body style="margin:0;background:#101114;color:#eee;font-family:Arial,sans-serif">
 <div style="padding:10px 14px;border-bottom:1px solid #333;background:#16181d;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
   <strong>PiCar Model Debug</strong>
-  <span style="color:#9aa4b2;margin-left:12px">No Drive Mode</span>
+  <span style="color:#9aa4b2;margin-left:12px">{"Manual Control" if control_enabled else "No Drive Mode"}</span>
   <button id="capture" style="margin-left:auto;background:#2d6cdf;color:#fff;border:0;border-radius:4px;padding:7px 10px;cursor:pointer">Capture</button>
   <button id="toggle" style="background:#2a2d35;color:#fff;border:1px solid #555;border-radius:4px;padding:6px 10px;cursor:pointer">Start Capture</button>
   <span id="status" style="color:#9aa4b2;font-size:13px"></span>
+</div>
+<div id="drive" style="display:{"block" if control_enabled else "none"};padding:10px 14px;border-bottom:1px solid #333;background:#14161b">
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button data-speed="35" style="padding:8px 12px">Forward</button>
+    <button data-angle="{min_angle}" style="padding:8px 12px">Left</button>
+    <button data-angle="{straight_angle}" data-speed="0" style="padding:8px 12px;background:#b43232;color:white">Stop</button>
+    <button data-angle="{max_angle}" style="padding:8px 12px">Right</button>
+    <button data-speed="-30" style="padding:8px 12px">Reverse</button>
+    <label>Angle <input id="angle" type="range" min="{min_angle}" max="{max_angle}" value="{straight_angle}"></label>
+    <label>Speed <input id="speed" type="range" min="-100" max="100" value="0"></label>
+    <button id="apply" style="padding:8px 12px">Apply</button>
+  </div>
+</div>
+<div style="display:{"none" if control_enabled else "block"};padding:8px 14px;color:#d0a56a;background:#18130f;border-bottom:1px solid #443">
+  Manual car control disabled/unavailable: {control_status}
 </div>
 <div style="padding:10px">
   <img id="stream" src="/stream" style="max-width:100%;height:auto;border:1px solid #333;display:block">
@@ -278,35 +415,120 @@ class Handler(BaseHTTPRequestHandler):
 const toggle = document.getElementById("toggle");
 const capture = document.getElementById("capture");
 const status = document.getElementById("status");
+const angle = document.getElementById("angle");
+const speed = document.getElementById("speed");
 let saving = false;
+const angleStep = 3;
+const forwardSpeed = 35;
+const reverseSpeed = -30;
+const minAngle = Number(angle ? angle.min : {min_angle});
+const maxAngle = Number(angle ? angle.max : {max_angle});
+const straightAngle = {straight_angle};
 
-toggle.addEventListener("click", async () => {
-  try {
-    const response = await fetch("/capture_toggle", {method: "POST"});
+function clamp(value, minimum, maximum) {{
+  return Math.max(minimum, Math.min(maximum, value));
+}}
+
+function currentAngle() {{
+  return Number(angle ? angle.value : straightAngle);
+}}
+
+function currentSpeed() {{
+  return Number(speed ? speed.value : 0);
+}}
+
+function setControlValues(nextAngle, nextSpeed) {{
+  const payload = {{}};
+  if (nextAngle !== undefined) {{
+    const clampedAngle = clamp(Number(nextAngle), minAngle, maxAngle);
+    if (angle) angle.value = clampedAngle;
+    payload.angle = clampedAngle;
+  }}
+  if (nextSpeed !== undefined) {{
+    const clampedSpeed = clamp(Number(nextSpeed), -100, 100);
+    if (speed) speed.value = clampedSpeed;
+    payload.speed = clampedSpeed;
+  }}
+  sendControl(payload);
+}}
+
+async function sendControl(payload) {{
+  try {{
+    const response = await fetch("/control", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify(payload)
+    }});
+    status.textContent = await response.text();
+  }} catch (error) {{
+    status.textContent = "Control failed";
+  }}
+}}
+
+document.querySelectorAll("[data-angle], [data-speed]").forEach((button) => {{
+  button.addEventListener("click", () => {{
+    const nextAngle = button.dataset.angle !== undefined ? Number(button.dataset.angle) : undefined;
+    const nextSpeed = button.dataset.speed !== undefined ? Number(button.dataset.speed) : undefined;
+    setControlValues(nextAngle, nextSpeed);
+  }});
+}});
+
+const apply = document.getElementById("apply");
+if (apply) {{
+  apply.addEventListener("click", () => sendControl({{angle: Number(angle.value), speed: Number(speed.value)}}));
+}}
+
+document.addEventListener("keydown", (event) => {{
+  if (event.target && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(event.target.tagName)) {{
+    return;
+  }}
+  if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) {{
+    return;
+  }}
+  event.preventDefault();
+  if (event.repeat && ["ArrowUp", "ArrowDown", " "].includes(event.key)) {{
+    return;
+  }}
+  if (event.key === "ArrowUp") {{
+    setControlValues(currentAngle(), forwardSpeed);
+  }} else if (event.key === "ArrowDown") {{
+    setControlValues(currentAngle(), reverseSpeed);
+  }} else if (event.key === "ArrowLeft") {{
+    setControlValues(currentAngle() - angleStep, currentSpeed());
+  }} else if (event.key === "ArrowRight") {{
+    setControlValues(currentAngle() + angleStep, currentSpeed());
+  }} else if (event.key === " ") {{
+    setControlValues(straightAngle, 0);
+  }}
+}});
+
+toggle.addEventListener("click", async () => {{
+  try {{
+    const response = await fetch("/capture_toggle", {{method: "POST"}});
     const text = await response.text();
     saving = text.includes("capture=on");
     toggle.textContent = saving ? "Stop Capture" : "Start Capture";
     status.textContent = saving ? "Streaming and saving at 5 FPS" : "Streaming at 5 FPS";
-  } catch (error) {
+  }} catch (error) {{
     status.textContent = "Capture toggle failed";
-  }
-});
+  }}
+}});
 
-capture.addEventListener("click", async () => {
+capture.addEventListener("click", async () => {{
   status.textContent = "Capturing...";
-  try {
-    const response = await fetch("/capture", {method: "POST"});
+  try {{
+    const response = await fetch("/capture", {{method: "POST"}});
     status.textContent = await response.text();
-  } catch (error) {
+  }} catch (error) {{
     status.textContent = "Capture failed";
-  }
-});
+  }}
+}});
 
 status.textContent = "Streaming at 5 FPS";
 </script>
 </body>
 </html>"""
-            )
+            self.wfile.write(html.encode("utf-8"))
             return
 
         if self.path == "/capture":
@@ -344,6 +566,8 @@ status.textContent = "Streaming at 5 FPS";
 
 
 def main() -> None:
+    global CAPTURE_DIR, manual_control
+
     parser = argparse.ArgumentParser(description="Run camera/model debug stream without driving the car.")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--host", default="0.0.0.0")
@@ -352,19 +576,47 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--fps", type=int, default=5)
     parser.add_argument("--quality", type=int, default=75)
+    parser.add_argument(
+        "--capture-dir",
+        type=Path,
+        default=None,
+        help="Directory for Capture/Start Capture images. Defaults to ./captures beside this script, or PICAR_CAPTURE_DIR.",
+    )
+    parser.add_argument(
+        "--enable-control",
+        action="store_true",
+        help="Enable manual car controls in the web page. Leave off for camera-only debug.",
+    )
+    parser.add_argument(
+        "--control-path",
+        default=os.environ.get("PICAR_CONTROL_PATH"),
+        help="Optional path containing the picar package, if it is not already importable.",
+    )
+    parser.add_argument(
+        "--config-file",
+        default=os.environ.get("PICAR_CONFIG_FILE"),
+        help="Optional SunFounder/PiCar config file path for Front_Wheels/Back_Wheels.",
+    )
     args = parser.parse_args()
+    if args.capture_dir is not None:
+        CAPTURE_DIR = args.capture_dir.expanduser().resolve()
+    manual_control = ManualCarControl(args.enable_control, args.config_file, args.control_path)
 
     thread = threading.Thread(target=_capture_loop, args=(args,), daemon=True)
     thread.start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Open http://<pi-ip-address>:{args.port} in your browser")
-    print("Press Ctrl+C to stop. This script does not command the car motors.")
+    print(f"Capture directory: {CAPTURE_DIR}")
+    print(f"Manual control: {manual_control.status}")
+    print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if manual_control is not None:
+            manual_control.stop()
         stop_event.set()
         server.server_close()
 

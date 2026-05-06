@@ -18,6 +18,17 @@ NVIDIA_MODEL_PATH = os.path.join(MODEL_DIR, "lane_nvidia.tflite")
 ARROW_MODEL_PATH = os.path.join(MODEL_DIR, "arrow_model.tflite")
 OBSTACLE_MODEL_PATH = os.path.join(MODEL_DIR, "obstacle_classifier.tflite")
 
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"[model] Ignoring invalid {name}={value!r}; using {default}.")
+        return default
+
 ANGLE_MIN = 50
 ANGLE_MAX = 120
 ANGLE_STRAIGHT = 90
@@ -104,8 +115,8 @@ DEBUG_EVERY = 10
 
 # Lightweight MJPEG web stream. Useful for tuning; disable for clean latency tests.
 ENABLE_DEBUG_STREAM = True
-DEBUG_STREAM_HOST = "0.0.0.0"
-DEBUG_STREAM_PORT = 8080
+DEBUG_STREAM_HOST = os.environ.get("PICAR_DEBUG_STREAM_HOST", "0.0.0.0")
+DEBUG_STREAM_PORT = _env_int("PICAR_DEBUG_STREAM_PORT", _env_int("PORT", 8080))
 DEBUG_STREAM_FPS = 5.0
 DEBUG_STREAM_JPEG_QUALITY = 70
 
@@ -127,7 +138,13 @@ ARROW_INPUT_MODE = "blue_crop"
 ARROW_USE_FULL_FRAME = True
 ARROW_ROI = (0, 0, 320, 130)
 ARROW_BLUE_MIN_AREA = 80
+ARROW_BLUE_MAX_AREA = 3500
+ARROW_BLUE_MAX_AREA_RATIO = 0.08
 ARROW_BLUE_PAD = 18
+ARROW_BLUE_CORRIDOR_X_MIN = 0.25
+ARROW_BLUE_CORRIDOR_X_MAX = 0.75
+ARROW_BLUE_CORRIDOR_Y_MIN = 0.00
+ARROW_BLUE_CORRIDOR_Y_MAX = 0.60
 ARROW_FLIP_HORIZONTAL = False
 ARROW_SWAP_LEFT_RIGHT = False
 ARROW_CONFIDENCE_THRESHOLD = 0.92
@@ -466,7 +483,7 @@ class DebugStream:
                 self._save_capture(capture)
 
     def _save_capture(self, capture: dict[str, np.ndarray]) -> list[str]:
-        capture_dir = os.path.join(MODEL_DIR, "captures")
+        capture_dir = os.path.expanduser(os.environ.get("PICAR_CAPTURE_DIR", os.path.join(MODEL_DIR, "captures")))
         os.makedirs(capture_dir, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         saved = []
@@ -481,19 +498,34 @@ class DebugStream:
         h, w = image.shape[:2]
         mode = ARROW_INPUT_MODE.lower()
         if mode == "blue_crop":
+            search_x1 = int(w * ARROW_BLUE_CORRIDOR_X_MIN)
+            search_x2 = int(w * ARROW_BLUE_CORRIDOR_X_MAX)
+            search_y1 = int(h * ARROW_BLUE_CORRIDOR_Y_MIN)
+            search_y2 = int(h * ARROW_BLUE_CORRIDOR_Y_MAX)
+            search_x1, search_x2 = max(0, search_x1), min(w, search_x2)
+            search_y1, search_y2 = max(0, search_y1), min(h, search_y2)
+            search = image[search_y1:search_y2, search_x1:search_x2]
+            if search.size == 0:
+                return image.copy()
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             blue = cv2.inRange(hsv, np.array([85, 45, 40]), np.array([135, 255, 255]))
+            corridor = np.zeros_like(blue)
+            corridor[search_y1:search_y2, search_x1:search_x2] = 255
+            blue = cv2.bitwise_and(blue, corridor)
             blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
             blue = cv2.dilate(blue, np.ones((5, 5), np.uint8), iterations=1)
             contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             best = None
             best_area = 0.0
+            max_area = min(float(ARROW_BLUE_MAX_AREA), float(w * h) * ARROW_BLUE_MAX_AREA_RATIO)
             for contour in contours:
                 area = cv2.contourArea(contour)
+                if area < ARROW_BLUE_MIN_AREA or area > max_area:
+                    continue
                 if area > best_area:
                     best_area = area
                     best = contour
-            if best is not None and best_area >= ARROW_BLUE_MIN_AREA:
+            if best is not None:
                 x, y, bw, bh = cv2.boundingRect(best)
                 pad = ARROW_BLUE_PAD
                 x1 = max(0, x - pad)
@@ -507,6 +539,23 @@ class DebugStream:
             y1, y2 = max(0, min(h, y1)), max(0, min(h, y2))
             return image[y1:y2, x1:x2].copy()
         return image.copy()
+
+    @staticmethod
+    def _preview_panel(image: np.ndarray, title: str, width: int, height: int) -> np.ndarray:
+        panel = np.zeros((height, width, 3), dtype=np.uint8)
+        panel[:] = (18, 20, 24)
+        if image.size > 0:
+            ih, iw = image.shape[:2]
+            scale = min(width / max(iw, 1), (height - 26) / max(ih, 1))
+            new_w = max(1, int(iw * scale))
+            new_h = max(1, int(ih * scale))
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            x = (width - new_w) // 2
+            y = 26 + (height - 26 - new_h) // 2
+            panel[y:y + new_h, x:x + new_w] = resized
+        cv2.rectangle(panel, (0, 0), (width - 1, height - 1), (72, 78, 88), 1)
+        cv2.putText(panel, title, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        return panel
 
     def _draw(self, frame: np.ndarray, debug: dict) -> np.ndarray:
         h, w = frame.shape[:2]
@@ -575,7 +624,15 @@ class DebugStream:
         mask_full = np.zeros_like(frame)
         mask_full[safety_y:, :] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         cv2.putText(mask_full, "OpenCV safety mask", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
-        return np.hstack([overlay, mask_full])
+        top = np.hstack([overlay, mask_full])
+        arrow_input = self._extract_arrow_image(frame)
+        arrow_panel = self._preview_panel(
+            arrow_input,
+            f"Arrow input: {ARROW_INPUT_MODE}",
+            top.shape[1],
+            160,
+        )
+        return np.vstack([top, arrow_panel])
 
     def _start_server(self) -> None:
         if DEBUG_STREAM_PORT in DebugStream._started_ports:
@@ -840,4 +897,134 @@ class Model:
             arrow=self.last_arrow,
             arrow_confidence=self.last_arrow_confidence,
             arrow_box=self.last_arrow_box,
-            arrow_control_active=ENABLE_ARRO
+            arrow_control_active=ENABLE_ARROW_CONTROL and (self.pending_turn in ("left", "right") or self.turn_frames_left > 0),
+            pending_turn=self.pending_turn,
+            turn_frames_left=self.turn_frames_left,
+            obstacle_seen=self.last_obstacle_seen,
+            obstacle_score=self.last_obstacle_score,
+            obstacle_box=self.last_obstacle_box,
+            obstacle_stop_active=ENABLE_OBSTACLE_STOP and self.last_obstacle_seen,
+        )
+
+    def _update_arrow(self, image: np.ndarray) -> None:
+        arrow_image, arrow_box = self._arrow_input_image(image)
+        self.last_arrow_box = arrow_box
+        if ARROW_FLIP_HORIZONTAL:
+            arrow_image = cv2.flip(arrow_image, 1)
+        arrow, confidence, class_probs = self.arrow.predict_with_probabilities(arrow_image)
+        if ARROW_SWAP_LEFT_RIGHT and arrow in ("left", "right"):
+            arrow = "right" if arrow == "left" else "left"
+        self.last_arrow_confidence = confidence
+        if ARROW_DEBUG_PROBS:
+            prob_text = " ".join(
+                f"{cls}={class_probs.get(cls, 0.0):.3f}" for cls in ARROW_CLASSES
+            )
+            print(
+                f"[arrow] raw={arrow}:{confidence:.3f} probs {prob_text} "
+                f"threshold={ARROW_CONFIDENCE_THRESHOLD:.2f} box={arrow_box}"
+            )
+        if confidence >= ARROW_CONFIDENCE_THRESHOLD and arrow in ("left", "right"):
+            self.arrow_streak = self.arrow_streak + 1 if arrow == self.last_arrow else 1
+            self.last_arrow = arrow
+        else:
+            self.arrow_streak = 0
+            self.last_arrow = "none"
+        if self.arrow_streak >= ARROW_CONFIRM_FRAMES:
+            self.pending_turn = self.last_arrow
+
+    @staticmethod
+    def _arrow_input_image(image: np.ndarray) -> tuple[np.ndarray, Optional[tuple[float, float, float, float]]]:
+        h, w = image.shape[:2]
+        mode = ARROW_INPUT_MODE.lower()
+        if mode == "blue_crop":
+            search_x1 = int(w * ARROW_BLUE_CORRIDOR_X_MIN)
+            search_x2 = int(w * ARROW_BLUE_CORRIDOR_X_MAX)
+            search_y1 = int(h * ARROW_BLUE_CORRIDOR_Y_MIN)
+            search_y2 = int(h * ARROW_BLUE_CORRIDOR_Y_MAX)
+            search_x1, search_x2 = max(0, search_x1), min(w, search_x2)
+            search_y1, search_y2 = max(0, search_y1), min(h, search_y2)
+            search = image[search_y1:search_y2, search_x1:search_x2]
+            if search.size == 0:
+                return image, None
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            blue = cv2.inRange(hsv, np.array([85, 45, 40]), np.array([135, 255, 255]))
+            corridor = np.zeros_like(blue)
+            corridor[search_y1:search_y2, search_x1:search_x2] = 255
+            blue = cv2.bitwise_and(blue, corridor)
+            blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+            blue = cv2.dilate(blue, np.ones((5, 5), np.uint8), iterations=1)
+            contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            best = None
+            best_area = 0.0
+            max_area = min(float(ARROW_BLUE_MAX_AREA), float(w * h) * ARROW_BLUE_MAX_AREA_RATIO)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < ARROW_BLUE_MIN_AREA or area > max_area:
+                    continue
+                if area > best_area:
+                    best_area = area
+                    best = contour
+            if best is not None:
+                x, y, bw, bh = cv2.boundingRect(best)
+                pad = ARROW_BLUE_PAD
+                x1 = max(0, x - pad)
+                y1 = max(0, y - pad)
+                x2 = min(w, x + bw + pad)
+                y2 = min(h, y + bh + pad)
+                box = (x1 / max(w, 1), y1 / max(h, 1), x2 / max(w, 1), y2 / max(h, 1))
+                return image[y1:y2, x1:x2], box
+
+        if mode == "roi" or (mode not in ("blue_crop", "full_frame") and not ARROW_USE_FULL_FRAME):
+            x1, y1, x2, y2 = ARROW_ROI
+            x1, x2 = max(0, min(w, x1)), max(0, min(w, x2))
+            y1, y2 = max(0, min(h, y1)), max(0, min(h, y2))
+            box = (x1 / max(w, 1), y1 / max(h, 1), x2 / max(w, 1), y2 / max(h, 1))
+            return image[y1:y2, x1:x2], box
+
+        return image, None
+
+    def _update_obstacle(self, image: np.ndarray) -> None:
+        label, confidence, class_probs = self.obstacle.predict_with_probabilities(image)
+        self.last_obstacle_seen = label == OBSTACLE_STOP_CLASS and confidence >= OBSTACLE_CONFIDENCE_THRESHOLD
+        self.last_obstacle_score = confidence
+        self.last_obstacle_box = None
+        if OBSTACLE_DEBUG_PROBS:
+            prob_text = " ".join(
+                f"{cls}={class_probs.get(cls, 0.0):.3f}" for cls in OBSTACLE_CLASSES
+            )
+            print(
+                f"[obstacle] raw={label}:{confidence:.3f} probs {prob_text} "
+                f"stop={self.last_obstacle_seen} threshold={OBSTACLE_CONFIDENCE_THRESHOLD:.2f}"
+            )
+
+    @staticmethod
+    def _blend_raw(mobilenet_raw: float, nvidia_raw: float) -> float:
+        if not np.isfinite(mobilenet_raw):
+            return nvidia_raw
+        if not np.isfinite(nvidia_raw):
+            return mobilenet_raw
+
+        if ENSEMBLE_MODE == "agreement":
+            if abs(mobilenet_raw - nvidia_raw) <= AGREEMENT_THRESHOLD:
+                return mobilenet_raw
+            return 0.5 * mobilenet_raw + 0.5 * nvidia_raw
+
+        if ENSEMBLE_MODE == "conditional" and mobilenet_raw >= RIGHT_ANGLE_START:
+            total = RIGHT_MOBILENET_WEIGHT + RIGHT_NVIDIA_WEIGHT
+            return (mobilenet_raw * RIGHT_MOBILENET_WEIGHT + nvidia_raw * RIGHT_NVIDIA_WEIGHT) / max(total, 1e-6)
+
+        total = MOBILENET_WEIGHT + NVIDIA_WEIGHT
+        return (mobilenet_raw * MOBILENET_WEIGHT + nvidia_raw * NVIDIA_WEIGHT) / max(total, 1e-6)
+
+    @staticmethod
+    def _choose_speed(angle: int, safety: SafetyStatus) -> int:
+        demand = abs(float(angle) - ANGLE_STRAIGHT)
+        if demand > 22:
+            speed = VERY_SLOW_SPEED
+        elif demand > 14:
+            speed = SLOW_SPEED
+        else:
+            speed = BASE_SPEED
+        if safety.active:
+            speed = min(speed, SLOW_SPEED)
+        return int(speed)
