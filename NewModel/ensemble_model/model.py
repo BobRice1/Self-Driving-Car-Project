@@ -123,7 +123,7 @@ DEBUG_STREAM_JPEG_QUALITY = 70
 # Event model control. Leave these False for observer mode.
 # When False, arrows/obstacles are detected and shown in logs/stream but do not
 # affect steering or speed.
-ENABLE_ARROW_CONTROL = False
+ENABLE_ARROW_CONTROL = True
 ENABLE_OBSTACLE_STOP = True
 EVENT_INTERVAL = 5
 
@@ -156,6 +156,23 @@ ARROW_RIGHT_ANGLE = 110
 ARROW_STEERING_EMA_ALPHA = 0.95
 ARROW_MAX_STEERING_DELTA = 60.0
 ARROW_SPEED = 30
+
+# Optional classical CV arrow detector. It looks for a blue circular sign,
+# then estimates left/right from the white arrow shape inside the blue ROI.
+ARROW_CV_ENABLED = True
+ARROW_CV_FALLBACK_TO_TFLITE = True
+BLUE_HSV_LOWER = np.array([85, 45, 40], dtype=np.uint8)
+BLUE_HSV_UPPER = np.array([140, 255, 255], dtype=np.uint8)
+ARROW_CV_BRIGHT_BLUE_LOWER = np.array([85, 120, 60], dtype=np.uint8)
+ARROW_CV_BRIGHT_BLUE_UPPER = np.array([140, 255, 255], dtype=np.uint8)
+ARROW_CV_MIN_AREA_RATIO = 0.00035
+ARROW_CV_MAX_AREA_RATIO = 0.08
+ARROW_CV_MAX_DIM_RATIO = 0.55
+ARROW_CV_EDGE_MARGIN_RATIO = 0.04
+ARROW_CV_BOTTOM_ZONE_RATIO = 0.72
+ARROW_CV_MIN_ASPECT_NEAR_SQUARE = 0.58
+ARROW_CV_SIGN_IMMINENT_PX_LEFT = 52
+ARROW_CV_SIGN_IMMINENT_PX_RIGHT = 52
 
 # Obstacle classifier settings. Only obstacle_in should trigger a stop; none
 # and obstacle_out are treated as continue states.
@@ -232,6 +249,146 @@ class EventStatus:
     obstacle_score: float
     obstacle_box: Optional[tuple[float, float, float, float]]
     obstacle_stop_active: bool
+
+
+def _estimate_arrow_distance(sign_diameter: float, arrow_direction: str) -> str:
+    if arrow_direction == "right":
+        threshold = ARROW_CV_SIGN_IMMINENT_PX_RIGHT
+    else:
+        threshold = ARROW_CV_SIGN_IMMINENT_PX_LEFT
+    return "imminent" if sign_diameter >= threshold else "approaching"
+
+
+def _detect_arrow_direction_cv(roi: np.ndarray) -> str:
+    bh, bw = roi.shape[:2]
+    if min(bw, bh) < 8:
+        return "unknown"
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    circle_mask = np.zeros((bh, bw), dtype=np.uint8)
+    cv2.circle(circle_mask, (bw // 2, bh // 2), int(min(bw, bh) * 0.45), 255, -1)
+
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    white_mask = cv2.inRange(hsv_roi, np.array([0, 0, 130]), np.array([180, 100, 255]))
+    white_in_circle = cv2.bitwise_and(white_mask, circle_mask)
+    white_px = np.count_nonzero(white_in_circle)
+
+    centroid_vote = 0
+    if white_px >= 3:
+        _, xs = np.where(white_in_circle > 0)
+        offset_ratio = (float(np.mean(xs)) - bw / 2.0) / max(bw / 2.0, 1.0)
+        if offset_ratio < -0.08:
+            centroid_vote = -1
+        elif offset_ratio > 0.08:
+            centroid_vote = 1
+
+    masked = cv2.bitwise_and(gray, circle_mask)
+    sx = cv2.Sobel(masked, cv2.CV_64F, 1, 0, ksize=3)
+    mid = bw // 2
+    left_edges = np.sum(np.abs(sx[:, :mid]))
+    right_edges = np.sum(np.abs(sx[:, mid:]))
+    sobel_vote = 0
+    if left_edges + right_edges > 0:
+        ratio = left_edges / (right_edges + 1e-6)
+        if ratio > 1.25:
+            sobel_vote = -1
+        elif ratio < 0.75:
+            sobel_vote = 1
+
+    total = centroid_vote + sobel_vote
+    if total <= -1:
+        return "left"
+    if total >= 1:
+        return "right"
+    return "unknown"
+
+
+def _detect_arrow_signs_cv(image: np.ndarray) -> list[dict]:
+    h, w = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    min_area = max(20, int(ARROW_CV_MIN_AREA_RATIO * h * w))
+    max_area = int(ARROW_CV_MAX_AREA_RATIO * h * w)
+    max_dim = int(ARROW_CV_MAX_DIM_RATIO * min(h, w))
+    edge_margin = max(5, int(ARROW_CV_EDGE_MARGIN_RATIO * w))
+
+    raw = cv2.inRange(hsv, BLUE_HSV_LOWER, BLUE_HSV_UPPER)
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(raw, cv2.MORPH_OPEN, open_kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+
+    bright_blue = cv2.inRange(hsv, ARROW_CV_BRIGHT_BLUE_LOWER, ARROW_CV_BRIGHT_BLUE_UPPER)
+    bright_blue = cv2.morphologyEx(bright_blue, cv2.MORPH_OPEN, open_kernel)
+    bright_blue = cv2.morphologyEx(
+        bright_blue,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+    )
+
+    combined = cv2.bitwise_or(mask, bright_blue)
+    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    detections = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area or area > max_area:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(contour)
+        cx = x + bw // 2
+        cy = y + bh // 2
+        if cx < edge_margin or cx > w - edge_margin:
+            continue
+        if cy > h - edge_margin or cy > h * ARROW_CV_BOTTOM_ZONE_RATIO:
+            continue
+        if max(bw, bh) > max_dim:
+            continue
+        squareness = min(bw, bh) / (max(bw, bh) + 1e-6)
+        if squareness < ARROW_CV_MIN_ASPECT_NEAR_SQUARE:
+            continue
+
+        contour_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+        mean_value = cv2.mean(hsv[:, :, 2], mask=contour_mask)[0]
+        mean_saturation = cv2.mean(hsv[:, :, 1], mask=contour_mask)[0]
+        if mean_value < 75 or mean_saturation < 90:
+            continue
+
+        (_, _), radius = cv2.minEnclosingCircle(contour)
+        pad = ARROW_BLUE_PAD
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w, x + bw + pad)
+        y2 = min(h, y + bh + pad)
+        roi = image[y1:y2, x1:x2]
+        direction = _detect_arrow_direction_cv(roi)
+        if direction == "unknown":
+            continue
+
+        diameter = float(radius * 2.0)
+        distance = _estimate_arrow_distance(diameter, direction)
+        confidence = min(0.99, 0.90 + min(0.05, area / max(max_area, 1)) + min(0.04, squareness * 0.04))
+        if distance == "imminent":
+            confidence = min(0.99, confidence + 0.02)
+        detections.append(
+            {
+                "direction": direction,
+                "confidence": float(confidence),
+                "distance": distance,
+                "diameter": diameter,
+                "area": float(area),
+                "box": (
+                    x1 / max(w, 1),
+                    y1 / max(h, 1),
+                    x2 / max(w, 1),
+                    y2 / max(h, 1),
+                ),
+            }
+        )
+
+    detections.sort(key=lambda item: (item["distance"] == "imminent", item["area"]), reverse=True)
+    return detections
 
 
 class TFLiteLanePredictor:
@@ -907,11 +1064,27 @@ class Model:
         )
 
     def _update_arrow(self, image: np.ndarray) -> None:
-        arrow_image, arrow_box = self._arrow_input_image(image)
+        arrow = "none"
+        confidence = 0.0
+        arrow_box = None
+        class_probs = {cls: 0.0 for cls in ARROW_CLASSES}
+        source = "cv"
+
+        if ARROW_CV_ENABLED:
+            detections = _detect_arrow_signs_cv(image)
+            if detections:
+                best = detections[0]
+                arrow = str(best["direction"])
+                confidence = float(best["confidence"])
+                arrow_box = best["box"]
+        if arrow not in ("left", "right") and ARROW_CV_FALLBACK_TO_TFLITE:
+            source = "tflite"
+            arrow_image, arrow_box = self._arrow_input_image(image)
+            if ARROW_FLIP_HORIZONTAL:
+                arrow_image = cv2.flip(arrow_image, 1)
+            arrow, confidence, class_probs = self.arrow.predict_with_probabilities(arrow_image)
+
         self.last_arrow_box = arrow_box
-        if ARROW_FLIP_HORIZONTAL:
-            arrow_image = cv2.flip(arrow_image, 1)
-        arrow, confidence, class_probs = self.arrow.predict_with_probabilities(arrow_image)
         if ARROW_SWAP_LEFT_RIGHT and arrow in ("left", "right"):
             arrow = "right" if arrow == "left" else "left"
         self.last_arrow_confidence = confidence
@@ -920,7 +1093,7 @@ class Model:
                 f"{cls}={class_probs.get(cls, 0.0):.3f}" for cls in ARROW_CLASSES
             )
             print(
-                f"[arrow] raw={arrow}:{confidence:.3f} probs {prob_text} "
+                f"[arrow] source={source} raw={arrow}:{confidence:.3f} probs {prob_text} "
                 f"threshold={ARROW_CONFIDENCE_THRESHOLD:.2f} box={arrow_box}"
             )
         if confidence >= ARROW_CONFIDENCE_THRESHOLD and arrow in ("left", "right"):
