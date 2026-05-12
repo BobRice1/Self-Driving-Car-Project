@@ -1,0 +1,6 @@
+split,rows
+train_old,4500
+train_figure8,177
+val_old,2500
+val_figure8,44
+checkpoint_arch,nvidia

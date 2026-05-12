@@ -1,0 +1,6 @@
+split,source,rows,steering_mean,steering_min,steering_max
+test,csv,2500,87.99425,50.0,120.0
+test,drive_frames,500,83.65,50.0,120.0
+train,csv,9383,87.75564851326868,50.0,120.0
+train,drive_frames,949,88.8145416227608,50.0,120.0
+val,csv,2500,87.541,50.0,120.0

@@ -5,6 +5,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv_tflite/
 venv/
 env/
 .venv_tflite/
@@ -41,6 +42,8 @@ outputs/submissions/*
 !outputs/submissions/*.csv
 
 # Dataset images (large, local-only)
+data/
+car/data/
 data/training_data/
 data/test_data/
 data/train_images/
