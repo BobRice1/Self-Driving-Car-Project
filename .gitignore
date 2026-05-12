@@ -48,15 +48,20 @@ data/training_data/
 data/test_data/
 data/train_images/
 data/test_images/
-NewModel/obstactle_data
+NewModel/obstacle_data/
 
 # Optional conda/local env artifacts
 *.conda
 conda-meta/
 
 
-.png
-.jpg
-.jpeg
-.zip
-.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.zip
+*.pdf
