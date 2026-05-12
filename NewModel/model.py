@@ -17,27 +17,81 @@ LANE_MODEL_PATH = os.path.join(MODEL_DIR, "lane_model.tflite")
 ANGLE_MIN = 50
 ANGLE_MAX = 120
 ANGLE_STRAIGHT = 90
-ANGLE_RUNTIME_MIN = int(os.environ.get("PICAR_ANGLE_RUNTIME_MIN", "70"))
-ANGLE_RUNTIME_MAX = int(os.environ.get("PICAR_ANGLE_RUNTIME_MAX", "110"))
 
-BASE_SPEED = int(os.environ.get("PICAR_BASE_SPEED", "12"))
-SLOW_SPEED = int(os.environ.get("PICAR_SLOW_SPEED", "10"))
-VERY_SLOW_SPEED = int(os.environ.get("PICAR_VERY_SLOW_SPEED", "8"))
+# Hard clamp applied to the steering command sent to the car.
+# Widen this range if the car is asking the correct direction but not turning enough.
+ANGLE_RUNTIME_MIN = 55
+ANGLE_RUNTIME_MAX = 150
 
-CROP_TOP_RATIO = float(os.environ.get("PICAR_CROP_TOP_RATIO", "0.35"))
-MODEL_OUTPUT_MODE = os.environ.get("PICAR_MODEL_OUTPUT_MODE", "angle")
-STEERING_EMA_ALPHA = float(os.environ.get("PICAR_STEERING_EMA_ALPHA", "0.35"))
-MAX_STEERING_DELTA = float(os.environ.get("PICAR_MAX_STEERING_DELTA", "7"))
+# Normal driving speeds. The runtime automatically chooses slower speeds for sharper steering.
+BASE_SPEED = 35
+SLOW_SPEED = 30
+VERY_SLOW_SPEED = 30
 
-USE_OPENCV_SAFETY = os.environ.get("PICAR_USE_OPENCV_SAFETY", "0") == "1"
-SAFETY_CORRECTION = float(os.environ.get("PICAR_SAFETY_CORRECTION", "4"))
-DEBUG_EVERY = int(os.environ.get("PICAR_DEBUG_EVERY", "10"))
+# Image/model interpretation.
+# CROP_TOP_RATIO removes the top part of the image before inference.
+# MODEL_OUTPUT_MODE should stay "angle" for the current TFLite model.
+# FLIP_INPUT mirrors the camera image before inference for orientation diagnosis only.
+# INVERT_STEERING flips left/right steering output for orientation diagnosis only.
+CROP_TOP_RATIO = 0.35
+MODEL_OUTPUT_MODE = "angle"
+FLIP_INPUT = False
+INVERT_STEERING = False
 
-ENABLE_DEBUG_STREAM = os.environ.get("PICAR_DEBUG_STREAM", "0") == "1"
-DEBUG_STREAM_HOST = os.environ.get("PICAR_DEBUG_HOST", "0.0.0.0")
-DEBUG_STREAM_PORT = int(os.environ.get("PICAR_DEBUG_PORT", "8080"))
-DEBUG_STREAM_FPS = float(os.environ.get("PICAR_DEBUG_FPS", "5"))
-DEBUG_STREAM_JPEG_QUALITY = int(os.environ.get("PICAR_DEBUG_JPEG_QUALITY", "70"))
+# Steering smoothing.
+# Higher EMA alpha reacts faster but can twitch more.
+# Lower max delta makes steering smoother but can react too slowly in bends.
+STEERING_EMA_ALPHA = 0.55
+RIGHT_STEERING_EMA_ALPHA = STEERING_EMA_ALPHA
+MAX_STEERING_DELTA = 9.0
+RIGHT_MAX_STEERING_DELTA = MAX_STEERING_DELTA
+
+# When the model changes from one side of straight to the other, use faster
+# release settings so a previous right-turn command does not drag the car
+# across the next left turn.
+SIDE_CHANGE_EMA_ALPHA = 0.75
+SIDE_CHANGE_MAX_STEERING_DELTA = 24.0
+
+# Extra assistance only when the model is already asking for a right turn.
+# BOOST_START is the model/requested angle where the assist begins.
+# BOOST adds extra right steering.
+# MIN_ANGLE forces at least this much right steering while active.
+# SPEED_LIMIT caps speed during assisted right turns when set above 0.
+#
+# For the current right-bend issue, try:
+# ANGLE_RUNTIME_MAX = 118
+# RIGHT_TURN_BOOST = 6.0
+# RIGHT_TURN_MIN_ANGLE = 106.0
+# RIGHT_STEERING_EMA_ALPHA = 0.50
+# RIGHT_MAX_STEERING_DELTA = 11.0
+# RIGHT_TURN_SPEED_LIMIT = 8
+RIGHT_TURN_BOOST = 3.0
+RIGHT_TURN_BOOST_START = 96.0
+RIGHT_TURN_MIN_ANGLE = 100.0
+RIGHT_TURN_SPEED_LIMIT = 0
+
+# Optional OpenCV correction based on detected black track markings.
+# Leave disabled until the base model is mostly stable, then use the debug stream
+# to confirm it is correcting in the intended direction.
+USE_OPENCV_SAFETY = True
+SAFETY_CORRECTION = 4.0
+
+# Reject dark fabric/carpet edges in the OpenCV mask.
+# These remove large dark components touching the image sides/top, which are
+# usually the black carpet around the white fabric rectangle rather than track.
+MASK_REJECT_BORDER_MARGIN = 4
+MASK_REJECT_MAX_COMPONENT_FRAC = 0.08
+MASK_REJECT_MIN_BORDER_AREA = 350
+
+# Console logging frequency. Set to 0 to disable periodic log lines.
+DEBUG_EVERY = 10
+
+# Lightweight MJPEG web stream. Useful for tuning; disable for clean latency tests.
+ENABLE_DEBUG_STREAM = True
+DEBUG_STREAM_HOST = "0.0.0.0"
+DEBUG_STREAM_PORT = 8080
+DEBUG_STREAM_FPS = 5.0
+DEBUG_STREAM_JPEG_QUALITY = 70
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -113,6 +167,8 @@ class TFLiteLanePredictor:
             self.width = shape[2]
 
     def predict_raw(self, bgr_frame: np.ndarray) -> float:
+        if FLIP_INPUT:
+            bgr_frame = cv2.flip(bgr_frame, 1)
         h = bgr_frame.shape[0]
         cropped = bgr_frame[int(h * CROP_TOP_RATIO):, :, :]
         resized = cv2.resize(cropped, (self.width, self.height), interpolation=cv2.INTER_AREA)
@@ -167,7 +223,27 @@ class OpenCVSafetyMonitor:
         support = cv2.dilate(white, np.ones((13, 13), np.uint8), iterations=1)
         mask = cv2.bitwise_and(dark, support)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        return mask
+        return OpenCVSafetyMonitor._reject_fabric_edges(mask)
+
+    @staticmethod
+    def _reject_fabric_edges(mask: np.ndarray) -> np.ndarray:
+        height, width = mask.shape[:2]
+        labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        filtered = np.zeros_like(mask)
+        max_area = int(width * height * MASK_REJECT_MAX_COMPONENT_FRAC)
+        margin = MASK_REJECT_BORDER_MARGIN
+
+        for label in range(1, labels_count):
+            x, y, w, h, area = stats[label]
+            touches_side_or_top = x <= margin or y <= margin or (x + w) >= width - margin
+            too_large = area > max_area
+            large_border_edge = touches_side_or_top and area > MASK_REJECT_MIN_BORDER_AREA
+            wide_sheet_edge = w > width * 0.80 and h < height * 0.16
+            if large_border_edge or too_large or wide_sheet_edge:
+                continue
+            filtered[labels == label] = 255
+
+        return filtered
 
     @staticmethod
     def _median(values: np.ndarray) -> Optional[float]:
@@ -210,6 +286,7 @@ class DebugStream:
         final_angle, speed = debug["decision"]
         raw = float(debug["raw_angle"])
         model_angle = float(debug["model_angle"])
+        requested_angle = float(debug.get("requested_angle", model_angle))
         crop_y = int(h * CROP_TOP_RATIO)
         safety_y = int(h * 0.45)
 
@@ -226,9 +303,9 @@ class DebugStream:
         panel_h = 72
         cv2.rectangle(overlay, (0, 0), (w - 1, panel_h), (0, 0, 0), -1)
         lines = [
-            f"frame={debug['frame_count']} raw={raw:.1f} model={model_angle:.1f} final={final_angle} speed={speed}",
+            f"frame={debug['frame_count']} raw={raw:.1f} model={model_angle:.1f} req={requested_angle:.1f} final={final_angle} speed={speed}",
             f"safety={safety.reason} active={safety.active} corr={safety.correction:.1f} conf={safety.confidence:.2f}",
-            f"runtime=({ANGLE_RUNTIME_MIN},{ANGLE_RUNTIME_MAX}) ema={STEERING_EMA_ALPHA:.2f} max_delta={MAX_STEERING_DELTA:.1f}",
+            f"assist_right={debug.get('right_assist_active', False)} side_change={debug.get('side_change_active', False)} ema={debug.get('alpha', STEERING_EMA_ALPHA):.2f} max_delta={debug.get('max_delta', MAX_STEERING_DELTA):.1f}",
         ]
         for i, text in enumerate(lines):
             cv2.putText(overlay, text, (8, 19 + i * 21), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
@@ -320,16 +397,36 @@ class Model:
     def predict_debug(self, image: np.ndarray) -> dict:
         raw = self.lane.predict_raw(image)
         model_angle = _to_angle(raw)
+        if INVERT_STEERING:
+            model_angle = ANGLE_STRAIGHT - (model_angle - ANGLE_STRAIGHT)
         safe_model_angle = _clip(model_angle, ANGLE_MIN, ANGLE_MAX)
 
         safety = self.safety_monitor.check(image) if USE_OPENCV_SAFETY else SafetyStatus(False, 0.0, "disabled", None, None, 0.0)
         requested_angle = safe_model_angle + safety.correction
+        right_assist_active = requested_angle >= RIGHT_TURN_BOOST_START
+        if right_assist_active:
+            requested_angle += RIGHT_TURN_BOOST
+            if RIGHT_TURN_MIN_ANGLE > 0:
+                requested_angle = max(requested_angle, RIGHT_TURN_MIN_ANGLE)
 
-        delta = _clip(requested_angle - self.last_angle, -MAX_STEERING_DELTA, MAX_STEERING_DELTA)
+        side_change_active = (
+            (self.last_angle > ANGLE_STRAIGHT + 4 and requested_angle < ANGLE_STRAIGHT - 4)
+            or (self.last_angle < ANGLE_STRAIGHT - 4 and requested_angle > ANGLE_STRAIGHT + 4)
+        )
+        if side_change_active:
+            alpha = SIDE_CHANGE_EMA_ALPHA
+            max_delta = SIDE_CHANGE_MAX_STEERING_DELTA
+        else:
+            alpha = RIGHT_STEERING_EMA_ALPHA if right_assist_active else STEERING_EMA_ALPHA
+            max_delta = RIGHT_MAX_STEERING_DELTA if right_assist_active else MAX_STEERING_DELTA
+
+        delta = _clip(requested_angle - self.last_angle, -max_delta, max_delta)
         limited_angle = self.last_angle + delta
-        smoothed_angle = self.last_angle * (1.0 - STEERING_EMA_ALPHA) + limited_angle * STEERING_EMA_ALPHA
+        smoothed_angle = self.last_angle * (1.0 - alpha) + limited_angle * alpha
         final_angle = int(round(_clip(smoothed_angle, ANGLE_RUNTIME_MIN, ANGLE_RUNTIME_MAX)))
         speed = self._choose_speed(final_angle, safety)
+        if right_assist_active and RIGHT_TURN_SPEED_LIMIT > 0:
+            speed = min(speed, RIGHT_TURN_SPEED_LIMIT)
 
         self.last_angle = float(final_angle)
         self.frame_count += 1
@@ -337,6 +434,11 @@ class Model:
             "decision": (final_angle, speed),
             "raw_angle": raw,
             "model_angle": model_angle,
+            "requested_angle": requested_angle,
+            "right_assist_active": right_assist_active,
+            "side_change_active": side_change_active,
+            "alpha": alpha,
+            "max_delta": max_delta,
             "safety": safety,
             "frame_count": self.frame_count,
         }
@@ -345,6 +447,8 @@ class Model:
         if DEBUG_EVERY > 0 and self.frame_count % DEBUG_EVERY == 0:
             print(
                 f"[model] raw={raw:.2f} converted={model_angle:.1f} final={final_angle} speed={speed} "
+                f"requested={requested_angle:.1f} right_assist={right_assist_active} "
+                f"side_change={side_change_active} "
                 f"safety={safety.reason} corr={safety.correction:.1f} outer={safety.outer_x} dashed={safety.dashed_x}"
             )
 

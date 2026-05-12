@@ -617,7 +617,7 @@ class LiveDebugStream:
         LiveDebugStream._started_ports.add(DEBUG_STREAM_PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        print(f"[model] Live debug stream: http://<pi-ip>:{DEBUG_STREAM_PORT}")
+        print(f"[model] Live debug stream: http://192.168.50.1:{DEBUG_STREAM_PORT}")
 
 
 class Model:

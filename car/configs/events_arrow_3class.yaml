@@ -1,0 +1,14 @@
+arrow:
+  data_dir: car/data/events/arrows
+  classes: [none, left, right]
+  input_size: 96
+  batch_size: 128
+  val_ratio: 0.2
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 2
+  early_stopping_patience: 6
+  dropout: 0.2
+  pretrained: true
+  hflip: false

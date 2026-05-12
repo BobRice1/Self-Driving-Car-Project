@@ -36,15 +36,34 @@ capture_enabled = False
 capture_lock = threading.Lock()
 stop_event = threading.Event()
 manual_control = None
+lane_activation_debugger = None
 CAPTURE_DIR = Path(
     os.environ.get("PICAR_CAPTURE_DIR", Path(__file__).resolve().parent / "captures")
 ).expanduser()
+
+
+def _resolve_control_config(config_file: Optional[str]) -> Optional[str]:
+    if config_file:
+        return str(Path(config_file).expanduser())
+
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        Path("/home/pi/SunFounder_PiCar-V/remote_control/remote_control/driver/config"),
+        script_dir / "remote_control" / "remote_control" / "driver" / "config",
+        script_dir / "picarfolders" / "remote_control" / "remote_control" / "driver" / "config",
+        script_dir.parent / "remote_control" / "remote_control" / "driver" / "config",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 class ManualCarControl:
     def __init__(self, enabled: bool, config_file: Optional[str], control_path: Optional[str]) -> None:
         self.enabled = False
         self.status = "disabled"
+        self.config_file = _resolve_control_config(config_file)
         self.lock = threading.Lock()
         self.fw = None
         self.bw = None
@@ -65,8 +84,8 @@ class ManualCarControl:
 
             picar.setup()
             kwargs = {"debug": False}
-            if config_file:
-                kwargs["db"] = config_file
+            if self.config_file:
+                kwargs["db"] = self.config_file
             self.fw = front_wheels.Front_Wheels(**kwargs)
             self.bw = back_wheels.Back_Wheels(**kwargs)
             self.bw.ready()
@@ -76,7 +95,11 @@ class ManualCarControl:
             self.max_angle = int(getattr(self.fw, "_max_angle", 135))
             self.angle = self.straight_angle
             self.enabled = True
-            self.status = "ready"
+            config_label = self.config_file if self.config_file else "picar default"
+            self.status = (
+                f"ready straight={self.straight_angle} min={self.min_angle} "
+                f"max={self.max_angle} config={config_label}"
+            )
         except Exception as exc:
             self.status = f"unavailable: {exc}"
             self.enabled = False
@@ -106,6 +129,180 @@ class ManualCarControl:
         with self.lock:
             self.speed = 0
             self.bw.stop()
+
+
+class LaneActivationDebugger:
+    def __init__(
+        self,
+        enabled: bool,
+        mobilenet_checkpoint: Path,
+        nvidia_checkpoint: Path,
+        device: str,
+    ) -> None:
+        self.enabled = False
+        self.status = "disabled"
+        self.models = {}
+        if not enabled:
+            return
+
+        try:
+            import torch
+            import torch.nn as nn
+
+            if device == "auto":
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            else:
+                self.device = torch.device(device)
+            self.torch = torch
+            self.nn = nn
+
+            loaded = []
+            for name, checkpoint in (
+                ("mobilenet", mobilenet_checkpoint),
+                ("nvidia", nvidia_checkpoint),
+            ):
+                try:
+                    state = self._load_model(name, Path(checkpoint))
+                except Exception as exc:
+                    print(f"[debug_camera] Lane activations unavailable for {name}: {exc}")
+                    state = None
+                if state is not None:
+                    self.models[name] = state
+                    loaded.append(name)
+            if loaded:
+                self.enabled = True
+                self.status = "ready: " + ", ".join(loaded)
+            else:
+                self.status = "unavailable: no lane checkpoints loaded"
+        except Exception as exc:
+            self.status = f"unavailable: {exc}"
+
+    def _load_model(self, name: str, checkpoint: Path):
+        if not checkpoint.is_file():
+            print(f"[debug_camera] Lane activation checkpoint missing for {name}: {checkpoint}")
+            return None
+        ckpt = self.torch.load(str(checkpoint), map_location=self.device)
+        height = int(ckpt.get("height", 80))
+        width = int(ckpt.get("width", 160))
+        arch = str(ckpt.get("arch", "nvidia"))
+        crop_top_ratio = float(ckpt.get("crop_top_ratio", car_model.CROP_TOP_RATIO))
+        model = self._build_model(arch, height, width)
+        state_dict = {k.replace("module.", ""): v for k, v in ckpt["model_state_dict"].items()}
+        model.load_state_dict(state_dict)
+        model.to(self.device)
+        model.eval()
+
+        target_layer = self._find_last_conv(model)
+        data = {
+            "name": name,
+            "model": model,
+            "height": height,
+            "width": width,
+            "crop_top_ratio": crop_top_ratio,
+            "activation": None,
+        }
+
+        def forward_hook(_module, _inputs, output):
+            data["activation"] = output
+            output.retain_grad()
+
+        target_layer.register_forward_hook(forward_hook)
+        return data
+
+    def _build_model(self, arch: str, height: int, width: int):
+        nn = self.nn
+        if arch == "nvidia":
+            class NvidiaLaneNet(nn.Module):
+                def __init__(self, model_height: int, model_width: int) -> None:
+                    super().__init__()
+                    self.features = nn.Sequential(
+                        nn.Conv2d(3, 24, kernel_size=5, stride=2),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(24, 36, kernel_size=5, stride=2),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(36, 48, kernel_size=5, stride=2),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(48, 64, kernel_size=3),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(64, 64, kernel_size=3),
+                        nn.ReLU(inplace=True),
+                    )
+                    with self_torch_no_grad():
+                        dummy = self_torch_zeros(1, 3, int(model_height), int(model_width))
+                        flat = self.features(dummy).numel()
+                    self.head = nn.Sequential(
+                        nn.Flatten(),
+                        nn.Linear(flat, 100),
+                        nn.ReLU(inplace=True),
+                        nn.Dropout(0.15),
+                        nn.Linear(100, 50),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(50, 10),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(10, 1),
+                    )
+
+                def forward(self, x):
+                    return self.head(self.features(x)).squeeze(-1)
+
+            self_torch_no_grad = self.torch.no_grad
+            self_torch_zeros = self.torch.zeros
+            return NvidiaLaneNet(height, width)
+
+        newmodel_dir = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(newmodel_dir))
+        from train_lane_model import build_model
+        return build_model(arch, height=height, width=width, pretrained=False)
+
+    def _find_last_conv(self, model):
+        last_conv = None
+        for module in model.modules():
+            if isinstance(module, self.nn.Conv2d):
+                last_conv = module
+        if last_conv is None:
+            raise ValueError("No Conv2d layer found for Grad-CAM")
+        return last_conv
+
+    def render_panels(self, frame: np.ndarray, selected: str, width: int, height: int) -> list[np.ndarray]:
+        if not self.enabled:
+            return [_preview_panel(np.zeros((1, 1, 3), dtype=np.uint8), f"Lane activations: {self.status}", width, height)]
+        names = ["mobilenet", "nvidia"] if selected == "both" else [selected]
+        panels = []
+        for name in names:
+            state = self.models.get(name)
+            if state is None:
+                panels.append(_preview_panel(np.zeros((1, 1, 3), dtype=np.uint8), f"{name} Grad-CAM: unavailable", width, height))
+                continue
+            panels.append(self._render_one(frame, state, width, height))
+        return panels
+
+    def _render_one(self, frame: np.ndarray, state: dict, width: int, height: int) -> np.ndarray:
+        torch = self.torch
+        model = state["model"]
+        if car_model.FLIP_INPUT:
+            frame = cv2.flip(frame, 1)
+        crop_y = int(frame.shape[0] * state["crop_top_ratio"])
+        crop = frame[crop_y:, :, :]
+        resized = cv2.resize(crop, (state["width"], state["height"]), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        normed = (rgb.astype(np.float32) / 255.0 - car_model.IMAGENET_MEAN) / car_model.IMAGENET_STD
+        tensor = torch.from_numpy(normed.transpose(2, 0, 1)).unsqueeze(0).to(self.device)
+
+        model.zero_grad(set_to_none=True)
+        output = model(tensor).reshape(-1)[0]
+        output.backward()
+
+        activation = state["activation"]
+        gradient = activation.grad if activation is not None else None
+        if activation is None or gradient is None:
+            return _preview_panel(resized, f"{state['name']} Grad-CAM: no gradients", width, height)
+
+        weights = gradient.mean(dim=(2, 3), keepdim=True)
+        cam = torch.relu((activation * weights).sum(dim=1))[0]
+        cam = cam.detach().cpu().numpy()
+        cam = cv2.resize(_normalize_map(cam), (state["width"], state["height"]), interpolation=cv2.INTER_LINEAR)
+        overlay = _heatmap_overlay(resized, cam)
+        return _preview_panel(overlay, f"{state['name']} Grad-CAM {float(output.detach().cpu()):.1f}", width, height)
 
 
 def _put_text(image, text: str, xy: tuple[int, int], scale: float = 0.5, color=(235, 235, 235), thickness: int = 1) -> None:
@@ -145,6 +342,60 @@ def _preview_panel(image: np.ndarray, title: str, width: int, height: int) -> np
     cv2.rectangle(panel, (0, 0), (width - 1, height - 1), (72, 78, 88), 1)
     _put_text(panel, title, (8, 18), 0.5, (255, 255, 255), 1)
     return panel
+
+
+def _normalize_map(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32)
+    vmin = float(values.min()) if values.size else 0.0
+    vmax = float(values.max()) if values.size else 0.0
+    if vmax <= vmin:
+        return np.zeros_like(values, dtype=np.float32)
+    return (values - vmin) / (vmax - vmin)
+
+
+def _heatmap_overlay(image: np.ndarray, heat: np.ndarray) -> np.ndarray:
+    heat_u8 = np.clip(heat * 255.0, 0, 255).astype(np.uint8)
+    heat_bgr = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
+    return cv2.addWeighted(image, 0.55, heat_bgr, 0.45, 0)
+
+
+def _arrow_occlusion_panel(
+    runtime: car_model.Model,
+    arrow_image: np.ndarray,
+    predicted_class: str,
+    target_class: str,
+    width: int,
+    height: int,
+    patch: int,
+    stride: int,
+) -> np.ndarray:
+    if not runtime.arrow.available or arrow_image.size == 0:
+        return _preview_panel(np.zeros((1, 1, 3), dtype=np.uint8), "Arrow occlusion: unavailable", width, height)
+
+    classifier = runtime.arrow
+    input_image = cv2.resize(arrow_image, (classifier.width, classifier.height), interpolation=cv2.INTER_AREA)
+    target = predicted_class if target_class == "auto" else target_class
+    _, baseline_conf, baseline_probs = classifier.predict_with_probabilities(input_image)
+    baseline = baseline_probs.get(target, baseline_conf if target == predicted_class else 0.0)
+
+    patch = max(4, min(int(patch), classifier.width, classifier.height))
+    stride = max(1, int(stride))
+    heat = np.zeros((classifier.height, classifier.width), dtype=np.float32)
+    counts = np.zeros_like(heat)
+
+    for y in range(0, classifier.height - patch + 1, stride):
+        for x in range(0, classifier.width - patch + 1, stride):
+            occluded = input_image.copy()
+            occluded[y:y + patch, x:x + patch, :] = 127
+            _, _, probs = classifier.predict_with_probabilities(occluded)
+            drop = max(0.0, baseline - probs.get(target, 0.0))
+            heat[y:y + patch, x:x + patch] += drop
+            counts[y:y + patch, x:x + patch] += 1.0
+
+    heat = heat / np.maximum(counts, 1.0)
+    overlay = _heatmap_overlay(input_image, _normalize_map(heat))
+    title = f"Arrow occlusion: {target} {baseline:.2f}"
+    return _preview_panel(overlay, title, width, height)
 
 
 def _build_status_panel(debug: dict, width: int = 640, height: int = 210):
@@ -196,7 +447,7 @@ def _build_status_panel(debug: dict, width: int = 640, height: int = 210):
     return panel
 
 
-def _draw_debug(frame, debug: dict, runtime: car_model.Model):
+def _draw_debug(frame, debug: dict, runtime: car_model.Model, args: argparse.Namespace):
     h, w = frame.shape[:2]
     overlay = frame.copy()
     event = debug["event"]
@@ -248,7 +499,26 @@ def _draw_debug(frame, debug: dict, runtime: car_model.Model):
 
     arrow_image, _ = runtime._arrow_input_image(frame)
     arrow_panel = _preview_panel(arrow_image, f"Arrow input: {car_model.ARROW_INPUT_MODE}", overlay.shape[1], overlay.shape[0])
-    top = cv2.hconcat([overlay, mask_full, arrow_panel])
+    panels = [overlay, mask_full, arrow_panel]
+    if args.lane_activations:
+        if lane_activation_debugger is None:
+            panels.append(_preview_panel(np.zeros((1, 1, 3), dtype=np.uint8), "Lane activations: unavailable", overlay.shape[1], overlay.shape[0]))
+        else:
+            panels.extend(lane_activation_debugger.render_panels(frame, args.lane_activation_model, overlay.shape[1], overlay.shape[0]))
+    if args.arrow_occlusion:
+        panels.append(
+            _arrow_occlusion_panel(
+                runtime,
+                arrow_image,
+                event.arrow,
+                args.arrow_occlusion_class,
+                overlay.shape[1],
+                overlay.shape[0],
+                args.occlusion_patch,
+                args.occlusion_stride,
+            )
+        )
+    top = cv2.hconcat(panels)
     panel = _build_status_panel(debug, width=top.shape[1], height=210)
     return cv2.vconcat([top, panel])
 
@@ -289,7 +559,7 @@ def _capture_loop(args: argparse.Namespace) -> None:
             continue
 
         debug = runtime.predict_debug(frame)
-        image = _draw_debug(frame, debug, runtime)
+        image = _draw_debug(frame, debug, runtime, args)
         arrow_image, _ = runtime._arrow_input_image(frame)
         ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), args.quality])
         if ok:
@@ -566,7 +836,7 @@ status.textContent = "Streaming at 5 FPS";
 
 
 def main() -> None:
-    global CAPTURE_DIR, manual_control
+    global CAPTURE_DIR, manual_control, lane_activation_debugger
 
     parser = argparse.ArgumentParser(description="Run camera/model debug stream without driving the car.")
     parser.add_argument("--camera", type=int, default=0)
@@ -576,6 +846,58 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--fps", type=int, default=5)
     parser.add_argument("--quality", type=int, default=75)
+    parser.add_argument(
+        "--lane-activations",
+        action="store_true",
+        help="Add live Grad-CAM activation heatmaps for the PyTorch lane model checkpoints.",
+    )
+    parser.add_argument(
+        "--lane-activation-model",
+        choices=["mobilenet", "nvidia", "both"],
+        default="both",
+        help="Which lane model activation heatmap to show when --lane-activations is enabled.",
+    )
+    parser.add_argument(
+        "--mobilenet-checkpoint",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "runs" / "lane_mobilenetv3_large_right_weighted" / "best.pt",
+        help="PyTorch checkpoint for the MobileNet lane model used for Grad-CAM.",
+    )
+    parser.add_argument(
+        "--nvidia-checkpoint",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "runs" / "lane_nvidia_right_weighted" / "best.pt",
+        help="PyTorch checkpoint for the Nvidia lane model used for Grad-CAM.",
+    )
+    parser.add_argument(
+        "--activation-device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Device for PyTorch lane Grad-CAM. Use cpu on the Pi unless CUDA is available.",
+    )
+    parser.add_argument(
+        "--arrow-occlusion",
+        action="store_true",
+        help="Add a live occlusion-sensitivity panel for the arrow classifier. This is slower than the normal stream.",
+    )
+    parser.add_argument(
+        "--arrow-occlusion-class",
+        choices=["auto", "none", "left", "right"],
+        default="auto",
+        help="Class to visualize in the occlusion panel. auto uses the current predicted arrow class.",
+    )
+    parser.add_argument(
+        "--occlusion-patch",
+        type=int,
+        default=32,
+        help="Patch size for arrow occlusion sensitivity, in arrow-model input pixels.",
+    )
+    parser.add_argument(
+        "--occlusion-stride",
+        type=int,
+        default=32,
+        help="Stride for arrow occlusion sensitivity, in arrow-model input pixels. Smaller is smoother but slower.",
+    )
     parser.add_argument(
         "--capture-dir",
         type=Path,
@@ -595,12 +917,18 @@ def main() -> None:
     parser.add_argument(
         "--config-file",
         default=os.environ.get("PICAR_CONFIG_FILE"),
-        help="Optional SunFounder/PiCar config file path for Front_Wheels/Back_Wheels.",
+        help="Optional SunFounder/PiCar config file path for Front_Wheels/Back_Wheels. If omitted, common local remote_control config paths are tried.",
     )
     args = parser.parse_args()
     if args.capture_dir is not None:
         CAPTURE_DIR = args.capture_dir.expanduser().resolve()
     manual_control = ManualCarControl(args.enable_control, args.config_file, args.control_path)
+    lane_activation_debugger = LaneActivationDebugger(
+        args.lane_activations,
+        args.mobilenet_checkpoint.expanduser().resolve(),
+        args.nvidia_checkpoint.expanduser().resolve(),
+        args.activation_device,
+    )
 
     thread = threading.Thread(target=_capture_loop, args=(args,), daemon=True)
     thread.start()
@@ -608,6 +936,12 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Open http://<pi-ip-address>:{args.port} in your browser")
     print(f"Capture directory: {CAPTURE_DIR}")
+    print(f"Lane activations: {lane_activation_debugger.status}")
+    print(
+        "Arrow occlusion: "
+        f"{'on' if args.arrow_occlusion else 'off'} "
+        f"(class={args.arrow_occlusion_class}, patch={args.occlusion_patch}, stride={args.occlusion_stride})"
+    )
     print(f"Manual control: {manual_control.status}")
     print("Press Ctrl+C to stop.")
     try:

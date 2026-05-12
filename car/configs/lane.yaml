@@ -1,0 +1,24 @@
+experiment:
+  run_name: lane_mobilenetv3s
+
+data:
+  width: 160
+  height: 120
+  crop_ratio: 0.4
+  batch_size: 64
+  val_batch_size: 128
+  num_workers: 4
+  hflip_p: 0.3
+
+training:
+  epochs: 25
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 2
+  mixed_precision: true
+  early_stopping_patience: 6
+  grad_clip_norm: 1.0
+  dropout: 0.2
+
+model:
+  pretrained: true

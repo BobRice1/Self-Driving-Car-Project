@@ -29,17 +29,29 @@ def _env_int(name: str, default: int) -> int:
         print(f"[model] Ignoring invalid {name}={value!r}; using {default}.")
         return default
 
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        print(f"[model] Ignoring invalid {name}={value!r}; using {default}.")
+        return default
+
+
 ANGLE_MIN = 50
-ANGLE_MAX = 120
-ANGLE_STRAIGHT = 90
+ANGLE_MAX = 135
+ANGLE_STRAIGHT = 94
 
 # Hard clamp applied to the steering command sent to the car.
 # Widen this range if the car is asking the correct direction but not turning enough.
 ANGLE_RUNTIME_MIN = 55
-ANGLE_RUNTIME_MAX = 120
+ANGLE_RUNTIME_MAX = 135
 
 # Normal driving speeds. The runtime automatically chooses slower speeds for sharper steering.
-BASE_SPEED = 35
+BASE_SPEED = 30
 SLOW_SPEED = 30
 VERY_SLOW_SPEED = 30
 
@@ -48,36 +60,39 @@ VERY_SLOW_SPEED = 30
 # MODEL_OUTPUT_MODE should stay "angle" for the current TFLite model.
 # FLIP_INPUT mirrors the camera image before inference for orientation diagnosis only.
 # INVERT_STEERING flips left/right steering output for orientation diagnosis only.
+# LANE_ANGLE_OFFSET is default-off trim for diagnosing camera/model bias.
+# Example: set PICAR_LANE_ANGLE_OFFSET=-4 if straight scenes consistently predict 94.
 CROP_TOP_RATIO = 0.35
 MODEL_OUTPUT_MODE = "angle"
 FLIP_INPUT = False
 INVERT_STEERING = False
+LANE_ANGLE_OFFSET = _env_float("PICAR_LANE_ANGLE_OFFSET", 0.0)
 
 # Two-model ensemble settings.
 # "weighted": always blend both models.
 # "agreement": use MobileNet when the models agree closely, otherwise average.
 # "conditional": use the right-turn weight only when MobileNet asks for a right turn.
 ENSEMBLE_MODE = "weighted"
-MOBILENET_WEIGHT = 0.65
-NVIDIA_WEIGHT = 0.35
+MOBILENET_WEIGHT = 0.75
+NVIDIA_WEIGHT = 0.25
 RIGHT_MOBILENET_WEIGHT = 0.50
 RIGHT_NVIDIA_WEIGHT = 0.50
-RIGHT_ANGLE_START = 96.0
+RIGHT_ANGLE_START = 98.0
 AGREEMENT_THRESHOLD = 8.0
 
 # Steering smoothing.
 # Higher EMA alpha reacts faster but can twitch more.
 # Lower max delta makes steering smoother but can react too slowly in bends.
-STEERING_EMA_ALPHA = 0.55
-RIGHT_STEERING_EMA_ALPHA = 0.10
-MAX_STEERING_DELTA = 9.0
-RIGHT_MAX_STEERING_DELTA = 14
+STEERING_EMA_ALPHA = 0.7
+RIGHT_STEERING_EMA_ALPHA = 0.15
+MAX_STEERING_DELTA = 15.0
+RIGHT_MAX_STEERING_DELTA = 8
 
 # When the model changes from one side of straight to the other, use faster
 # release settings so a previous right-turn command does not drag the car
 # across the next left turn.
-SIDE_CHANGE_EMA_ALPHA = 0.90
-SIDE_CHANGE_MAX_STEERING_DELTA = 50
+SIDE_CHANGE_EMA_ALPHA = 1
+SIDE_CHANGE_MAX_STEERING_DELTA = 100
 
 # Extra assistance only when the model is already asking for a right turn.
 # BOOST_START is the model/requested angle where the assist begins.
@@ -92,8 +107,8 @@ SIDE_CHANGE_MAX_STEERING_DELTA = 50
 # RIGHT_STEERING_EMA_ALPHA = 0.50
 # RIGHT_MAX_STEERING_DELTA = 11.0
 # RIGHT_TURN_SPEED_LIMIT = 8
-RIGHT_TURN_BOOST = 15.0
-RIGHT_TURN_BOOST_START = 96.0
+RIGHT_TURN_BOOST = 12.0
+RIGHT_TURN_BOOST_START = 108.0
 RIGHT_TURN_MIN_ANGLE = 0
 RIGHT_TURN_SPEED_LIMIT = 0
 
@@ -123,7 +138,7 @@ DEBUG_STREAM_JPEG_QUALITY = 70
 # Event model control. Leave these False for observer mode.
 # When False, arrows/obstacles are detected and shown in logs/stream but do not
 # affect steering or speed.
-ENABLE_ARROW_CONTROL = False
+ENABLE_ARROW_CONTROL = True
 ENABLE_OBSTACLE_STOP = True
 EVENT_INTERVAL = 5
 
@@ -137,17 +152,17 @@ ARROW_CLASSES = ["none", "left", "right"]
 ARROW_INPUT_MODE = "blue_crop"
 ARROW_USE_FULL_FRAME = True
 ARROW_ROI = (0, 0, 320, 130)
-ARROW_BLUE_MIN_AREA = 80
-ARROW_BLUE_MAX_AREA = 3500
-ARROW_BLUE_MAX_AREA_RATIO = 0.08
-ARROW_BLUE_PAD = 18
-ARROW_BLUE_CORRIDOR_X_MIN = 0.25
-ARROW_BLUE_CORRIDOR_X_MAX = 0.75
+ARROW_BLUE_MIN_AREA = 20
+ARROW_BLUE_MAX_AREA = 100
+ARROW_BLUE_MAX_AREA_RATIO = 0.8
+ARROW_BLUE_PAD = 10
+ARROW_BLUE_CORRIDOR_X_MIN = 0.40
+ARROW_BLUE_CORRIDOR_X_MAX = 0.60
 ARROW_BLUE_CORRIDOR_Y_MIN = 0.00
-ARROW_BLUE_CORRIDOR_Y_MAX = 0.60
+ARROW_BLUE_CORRIDOR_Y_MAX = 0.50
 ARROW_FLIP_HORIZONTAL = False
 ARROW_SWAP_LEFT_RIGHT = False
-ARROW_CONFIDENCE_THRESHOLD = 0.92
+ARROW_CONFIDENCE_THRESHOLD = 0.65
 ARROW_CONFIRM_FRAMES = 2
 ARROW_DEBUG_PROBS = True
 ARROW_TURN_FRAMES = 20
@@ -798,6 +813,7 @@ class Model:
         model_angle = _to_angle(raw)
         if INVERT_STEERING:
             model_angle = ANGLE_STRAIGHT - (model_angle - ANGLE_STRAIGHT)
+        model_angle += LANE_ANGLE_OFFSET
         safe_model_angle = _clip(model_angle, ANGLE_MIN, ANGLE_MAX)
 
         safety = self.safety_monitor.check(image) if USE_OPENCV_SAFETY else SafetyStatus(False, 0.0, "disabled", None, None, 0.0)
@@ -845,9 +861,10 @@ class Model:
             alpha = RIGHT_STEERING_EMA_ALPHA if right_assist_active else STEERING_EMA_ALPHA
             max_delta = RIGHT_MAX_STEERING_DELTA if right_assist_active else MAX_STEERING_DELTA
 
-        delta = _clip(requested_angle - self.last_angle, -max_delta, max_delta)
-        limited_angle = self.last_angle + delta
-        smoothed_angle = self.last_angle * (1.0 - alpha) + limited_angle * alpha
+        previous_angle = self.last_angle
+        delta = _clip(requested_angle - previous_angle, -max_delta, max_delta)
+        limited_angle = previous_angle + delta
+        smoothed_angle = previous_angle * (1.0 - alpha) + limited_angle * alpha
         final_angle = int(round(_clip(smoothed_angle, ANGLE_RUNTIME_MIN, ANGLE_RUNTIME_MAX)))
         speed = 0 if ENABLE_OBSTACLE_STOP and event.obstacle_stop_active else self._choose_speed(final_angle, safety)
         if arrow_turn_active:
@@ -863,7 +880,12 @@ class Model:
             "mobilenet_raw": mobilenet_raw,
             "nvidia_raw": nvidia_raw,
             "model_angle": model_angle,
+            "lane_angle_offset": LANE_ANGLE_OFFSET,
             "requested_angle": requested_angle,
+            "previous_angle": previous_angle,
+            "limited_angle": limited_angle,
+            "smoothed_angle": smoothed_angle,
+            "smoothing_delta": delta,
             "right_assist_active": right_assist_active,
             "side_change_active": side_change_active,
             "arrow_turn_active": arrow_turn_active,
@@ -880,7 +902,9 @@ class Model:
             print(
                 f"[model] raw={raw:.2f} mobilenet={mobilenet_raw:.2f} nvidia={nvidia_raw:.2f} "
                 f"converted={model_angle:.1f} final={final_angle} speed={speed} "
-                f"requested={requested_angle:.1f} right_assist={right_assist_active} "
+                f"requested={requested_angle:.1f} prev={previous_angle:.1f} limited={limited_angle:.1f} "
+                f"smooth={smoothed_angle:.1f} delta={delta:.1f} offset={LANE_ANGLE_OFFSET:.1f} "
+                f"right_assist={right_assist_active} "
                 f"side_change={side_change_active} state={controller_state} "
                 f"safety={safety.reason} corr={safety.correction:.1f} outer={safety.outer_x} dashed={safety.dashed_x} "
                 f"arrow={event.arrow}:{event.arrow_confidence:.2f} pending={event.pending_turn} "
