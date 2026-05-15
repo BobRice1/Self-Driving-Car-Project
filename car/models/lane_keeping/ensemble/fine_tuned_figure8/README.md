@@ -1,6 +1,6 @@
 # Figure-8 Fine-Tuned Lane Models
 
-Fine-tuned from the existing right-weighted lane checkpoints using the additional data in `NewModel/ensemble_model/8`.
+Fine-tuned from the existing right-weighted lane checkpoints using the additional data in `car/data/lane_keeping/figure8`.
 
 ## Data
 

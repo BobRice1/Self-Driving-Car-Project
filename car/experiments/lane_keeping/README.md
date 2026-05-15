@@ -1,4 +1,4 @@
-# NewModel lane keeping build
+# Lane keeping experiment
 
 This folder implements the handover plan in `codex_handover_lane_keeping_model_plan.md`.
 
@@ -11,10 +11,10 @@ The training target is the real Pi car steering angle:
 ## 1. Prepare splits
 
 ```powershell
-python NewModel\prepare_data.py `
+python car\experiments\lane_keeping\prepare_data.py `
   --csv-data data `
   --drive-frames car\data\drive_frames `
-  --out-dir NewModel\splits
+  --out-dir car\data\lane_keeping\splits
 ```
 
 This combines:
@@ -31,10 +31,10 @@ Use the main project `.venv` for training. It has CUDA PyTorch installed; on thi
 Current deployed architecture is MobileNetV3-Large:
 
 ```powershell
-.\.venv\Scripts\python.exe NewModel\train_lane_model.py `
+.\.venv\Scripts\python.exe car\experiments\lane_keeping\train_lane_model.py `
   --arch mobilenet_v3_large `
-  --splits-dir NewModel\splits `
-  --out-dir NewModel\runs\lane_mobilenetv3_large_right_weighted `
+  --splits-dir car\data\lane_keeping\splits `
+  --out-dir car\models\lane_keeping\runs\lane_mobilenetv3_large_right_weighted `
   --epochs 25 `
   --batch-size 128 `
   --num-workers 0 `
@@ -47,7 +47,7 @@ Current deployed architecture is MobileNetV3-Large:
 The best checkpoint is saved as:
 
 ```text
-NewModel/runs/lane_mobilenetv3_large_right_weighted/best.pt
+car/models/lane_keeping/runs/lane_mobilenetv3_large_right_weighted/best.pt
 ```
 
 The model predicts direct car steering angle, not normalized steering.
@@ -55,9 +55,9 @@ The model predicts direct car steering angle, not normalized steering.
 Older NVIDIA CNN checkpoints are still available for fallback/comparison:
 
 ```text
-NewModel/runs/lane_nvidia_right_weighted_balanced/best.pt
-NewModel/runs/lane_nvidia_bend_selected/best.pt
-NewModel/runs/lane_nvidia/best.pt
+car/models/lane_keeping/runs/lane_nvidia_right_weighted_balanced/best.pt
+car/models/lane_keeping/runs/lane_nvidia_bend_selected/best.pt
+car/models/lane_keeping/runs/lane_nvidia/best.pt
 ```
 
 ## 3. Export
@@ -65,17 +65,17 @@ NewModel/runs/lane_nvidia/best.pt
 Export ONNX:
 
 ```powershell
-.\.venv\Scripts\python.exe NewModel\export_lane_model.py `
-  --checkpoint NewModel\runs\lane_mobilenetv3_large_right_weighted\best.pt `
-  --onnx NewModel\runs\lane_mobilenetv3_large_right_weighted\lane_model.onnx
+.\.venv\Scripts\python.exe car\experiments\lane_keeping\export_lane_model.py `
+  --checkpoint car\models\lane_keeping\runs\lane_mobilenetv3_large_right_weighted\best.pt `
+  --onnx car\models\lane_keeping\runs\lane_mobilenetv3_large_right_weighted\lane_model.onnx
 ```
 
 Convert ONNX to TFLite with `.venv_tflite`:
 
 ```powershell
 .\.venv_tflite\Scripts\python.exe -m car.training.convert_onnx_to_tflite `
-  --onnx NewModel\runs\lane_mobilenetv3_large_right_weighted\lane_model.onnx `
-  --output NewModel\lane_model.tflite
+  --onnx car\models\lane_keeping\runs\lane_mobilenetv3_large_right_weighted\lane_model.onnx `
+  --output car\models\lane_keeping\current\lane_model.tflite
 ```
 
 Direct `--tflite` export is also supported by `export_lane_model.py` if a working `litert-torch` stack is installed, but this repo's `.venv_tflite` conversion route is the verified local path.
@@ -85,8 +85,8 @@ Direct `--tflite` export is also supported by `export_lane_model.py` if a workin
 Copy these files to the Pi model folder:
 
 ```text
-NewModel/model.py
-NewModel/lane_model.tflite
+car/models/lane_keeping/current/model.py
+car/models/lane_keeping/current/lane_model.tflite
 ```
 
 The runtime is ML-primary. OpenCV safety is disabled by default and only applies small corrections when enabled.
@@ -218,7 +218,7 @@ export PICAR_DEBUG_EVERY=5
 
 ## 6. Experimental arrow and obstacle runtime
 
-`NewModel/experimental_event_model` is a separate deployment bundle for figure-of-8/T-junction experiments. Copy the whole folder contents to the Pi model folder:
+`car/models/lane_keeping/experimental_event_model` is a separate deployment bundle for figure-of-8/T-junction experiments. Copy the whole folder contents to the Pi model folder:
 
 ```text
 model.py

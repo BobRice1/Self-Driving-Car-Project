@@ -7,8 +7,8 @@ Setup example:
     pip install onnx onnx2tf tensorflow==2.15.*
 
 Usage:
-    python -m car.training.convert_onnx_to_tflite --onnx car/checkpoints/lane_best.onnx --output car/checkpoints/lane_best.tflite
-    python -m car.training.convert_onnx_to_tflite --onnx car/checkpoints/arrow_best.onnx --output car/checkpoints/arrow_best.tflite
+    python -m car.training.convert_onnx_to_tflite --onnx car/models/lane/checkpoints/lane_best.onnx --output car/models/lane/checkpoints/lane_best.tflite
+    python -m car.training.convert_onnx_to_tflite --onnx car/models/arrow/checkpoints/arrow_best.onnx --output car/models/arrow/checkpoints/arrow_best.tflite
 """
 from __future__ import annotations
 

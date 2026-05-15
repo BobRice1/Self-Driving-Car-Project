@@ -11,8 +11,8 @@ Requires one of:
 
 Usage:
     python -m car.training.export_litert --all
-    python -m car.training.export_litert --type lane --checkpoint car/checkpoints/lane_best.pt --output car/checkpoints/lane_best.tflite
-    python -m car.training.export_litert --type event --checkpoint car/checkpoints/arrow_best.pt --output car/checkpoints/arrow_best.tflite --num_classes 2
+    python -m car.training.export_litert --type lane --checkpoint car/models/lane/checkpoints/lane_best.pt --output car/models/lane/checkpoints/lane_best.tflite
+    python -m car.training.export_litert --type event --checkpoint car/models/arrow/checkpoints/arrow_best.pt --output car/models/arrow/checkpoints/arrow_best.tflite --num_classes 2
 """
 from __future__ import annotations
 
@@ -95,15 +95,15 @@ def main() -> None:
     if args.all:
         export_one(
             "lane",
-            Path("car/checkpoints/lane_best.pt"),
-            Path("car/checkpoints/lane_best.tflite"),
+            Path("car/models/lane/checkpoints/lane_best.pt"),
+            Path("car/models/lane/checkpoints/lane_best.tflite"),
             args.num_classes,
             args.input_size,
         )
         export_one(
             "event",
-            Path("car/checkpoints/arrow_best.pt"),
-            Path("car/checkpoints/arrow_best.tflite"),
+            Path("car/models/arrow/checkpoints/arrow_best.pt"),
+            Path("car/models/arrow/checkpoints/arrow_best.tflite"),
             args.num_classes,
             args.input_size,
         )

@@ -2,7 +2,7 @@
 Benchmark lane model inference speed.
 
 Usage:
-    python -m car.training.lane.benchmark --checkpoint car/checkpoints/lane_mobilenetv3s_*/best.pt
+    python -m car.training.lane.benchmark --checkpoint car/models/lane/checkpoints/lane_mobilenetv3s_*/best.pt
 """
 import argparse
 import time

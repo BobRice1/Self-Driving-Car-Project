@@ -19,6 +19,17 @@ pip install -r requirements.txt
 
 ## Data Layout
 
+Repository layout:
+- `src/` - Kaggle training/inference package
+- `configs/` - Kaggle model configs
+- `car/` - PiCar runtime, training code, car-side experiments, datasets, and models
+- `car/models/` - exported car models, checkpoints, and deployable model bundles
+- `car/experiments/lane_keeping/` - lane-keeping data prep, training, export, and evaluation scripts
+- `data/` - Kaggle datasets and CSV files
+- `deploy/` - self-contained deployment snapshots for the car
+- `docs/` - project guidance, notes, and plans
+- `outputs/` - generated logs, submissions, and training outputs
+
 The loader supports both folder conventions:
 - `data/train_images`, `data/test_images`
 - `data/training_data`, `data/test_data`

@@ -312,10 +312,10 @@ class Model:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build single-file autopilot model.py.")
-    parser.add_argument("--lane", type=Path, default=Path("car/checkpoints/lane_best.tflite"))
-    parser.add_argument("--arrow", type=Path, default=Path("car/checkpoints/arrow_best.tflite"))
-    parser.add_argument("--obstacle_cpu", type=Path, default=Path("car/checkpoints/obstacle_detector.tflite"))
-    parser.add_argument("--obstacle_edgetpu", type=Path, default=Path("car/checkpoints/obstacle_detector_edgetpu.tflite"))
+    parser.add_argument("--lane", type=Path, default=Path("car/models/lane/checkpoints/lane_best.tflite"))
+    parser.add_argument("--arrow", type=Path, default=Path("car/models/arrow/checkpoints/arrow_best.tflite"))
+    parser.add_argument("--obstacle_cpu", type=Path, default=Path("car/models/obstacle/checkpoints/obstacle_detector.tflite"))
+    parser.add_argument("--obstacle_edgetpu", type=Path, default=Path("car/models/obstacle/checkpoints/obstacle_detector_edgetpu.tflite"))
     parser.add_argument("--output", type=Path, default=Path("deploy/picar_single_file/model.py"))
     return parser.parse_args()
 

@@ -2,10 +2,10 @@
 Download a pre-trained SSD MobileNet V2 from TF Hub and export to TFLite (INT8).
 
 The Edge TPU compiler can then be run on the output:
-    edgetpu_compiler car/checkpoints/obstacle_detector.tflite
+    edgetpu_compiler car/models/obstacle/checkpoints/obstacle_detector.tflite
 
 Usage:
-    python -m car.training.detector.convert_tflite --output car/checkpoints/obstacle_detector.tflite
+    python -m car.training.detector.convert_tflite --output car/models/obstacle/checkpoints/obstacle_detector.tflite
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("car/checkpoints/obstacle_detector.tflite"),
+        default=Path("car/models/obstacle/checkpoints/obstacle_detector.tflite"),
     )
     parser.add_argument("--input_size", type=int, default=320, help="Model input size (square).")
     parser.add_argument("--num_calibration", type=int, default=100, help="Calibration samples for INT8.")

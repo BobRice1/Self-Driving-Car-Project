@@ -1,5 +1,5 @@
 obstacle:
-  data_dir: NewModel/obstacle_data
+  data_dir: car/data/obstacles
   classes: [none, obstacle_out, obstacle_in]
   input_size: 128
   batch_size: 64

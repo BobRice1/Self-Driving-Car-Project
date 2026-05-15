@@ -80,16 +80,16 @@ def main() -> None:
     if args.all:
         export_one(
             "lane",
-            Path("car/checkpoints/lane_best.pt"),
-            Path("car/checkpoints/lane_best.onnx"),
+            Path("car/models/lane/checkpoints/lane_best.pt"),
+            Path("car/models/lane/checkpoints/lane_best.onnx"),
             args.num_classes,
             args.input_size,
             args.opset,
         )
         export_one(
             "event",
-            Path("car/checkpoints/arrow_best.pt"),
-            Path("car/checkpoints/arrow_best.onnx"),
+            Path("car/models/arrow/checkpoints/arrow_best.pt"),
+            Path("car/models/arrow/checkpoints/arrow_best.onnx"),
             args.num_classes,
             args.input_size,
             args.opset,

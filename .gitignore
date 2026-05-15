@@ -42,13 +42,14 @@ outputs/submissions/*
 !outputs/submissions/*.csv
 
 # Dataset images (large, local-only)
-data/
-car/data/
-data/training_data/
-data/test_data/
-data/train_images/
-data/test_images/
-NewModel/obstacle_data/
+/data/
+/data/training_data/
+/data/test_data/
+/data/train_images/
+/data/test_images/
+car/data/obstacles/
+car/data/lane_keeping/figure8/
+car/data/events/**/*.csv
 
 # Optional conda/local env artifacts
 *.conda

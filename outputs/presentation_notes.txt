@@ -1,0 +1,122 @@
+
+
+The goal of this project is to predict the steering angle and speed of a
+self-driving car from a single dashboard camera image. Both outputs are
+continuous values normalised to the range 0–1. This is framed as a
+regression task: given a photo of the road ahead, the model must learn
+what a human driver would do.
+
+Images are loaded with OpenCV and converted from BGR to RGB. Every image
+is resized to 320 by 240 pixels so the model always receives a
+consistent input size, then pixel values are normalised using the
+ImageNet channel means and standard deviations.
+
+During training we apply a suite of data augmentations using the
+Albumentations library to improve generalisation:
+
+  - Random brightness and contrast changes (p=0.5)
+  - Random gamma shifts (p=0.3)
+  - Random blur — either motion blur or Gaussian blur (p=0.15)
+  - Gaussian noise (p=0.1)
+  - JPEG compression artefacts (p=0.1)
+  - Small affine warps: up to 5% zoom, 3% translation, 5 degrees
+    rotation (p=0.3)
+  - Horizontal flip with 20% probability, which also mirrors the
+    steering angle (angle becomes 1 minus the original) so the label
+    stays correct
+
+These augmentations simulate real-world variation — different lighting,
+camera shake, image quality — so the model cannot simply memorise the
+training set.
+
+During validation and testing, only the resize and normalisation steps
+are applied, with no random augmentations.
+
+
+The model is called SelfDrivingRegressor and has three parts:
+
+1. BACKBONE — EfficientNetV2-S
+   We use EfficientNetV2-Small as the feature extractor, loaded with
+   pretrained ImageNet weights via the timm library. This is a modern
+   convolutional network that is both accurate and efficient. It takes
+   the 3-channel 240x320 input and, through a series of convolutional
+   blocks, progressively reduces spatial resolution while increasing
+   the number of feature channels:
+
+     Input (3 x 240 x 320)
+       -> Conv + BatchNorm + SiLU  ->  24 channels, 120 x 160
+       -> 6 sequential conv blocks ->  256 channels, 8 x 10
+       -> 1x1 Conv                 ->  1280 channels, 8 x 10
+       -> Global average pooling   ->  1280-dimensional vector
+
+   The backbone condenses the image into a single vector of 1280
+   features that summarise the visual content of the scene.
+
+2. SHARED HEAD
+   A fully connected layer maps the 1280 features down to 256, followed
+   by a GELU activation and 20% dropout. This compact representation is
+   shared by both prediction heads.
+
+3. TWO TASK-SPECIFIC HEADS
+   - Angle head: a linear layer producing 17 logits, one per bin.
+     Softmax converts these to probabilities, and a weighted sum over
+     17 evenly-spaced bins from 0.0 to 1.0 gives the final continuous
+     angle prediction. This soft-classification approach is more stable
+     than direct regression because it lets the model express
+     uncertainty across neighbouring bins.
+   - Speed head: a single linear output passed through a sigmoid to
+     produce a value between 0 and 1.
+
+The model totals roughly 20.5 million parameters.
+
+
+LOSS FUNCTION
+The loss is a weighted sum of two MSE terms:
+
+  Total loss = 2.5 x MSE(angle) + 1.0 x MSE(speed)
+
+Angle is weighted more heavily because accurate steering is more safety-
+critical. Additionally, a sample weighting scheme upweights images where
+the true angle is far from 0.5 (i.e. sharp turns rather than going
+straight), using the formula:
+
+  weight = 1 + 3.0 x |angle_true - 0.5|
+
+This addresses class imbalance — most driving is going roughly straight,
+but the model needs to handle turns well.
+
+TRAINING STRATEGY
+  - Optimiser: AdamW with learning rate 3e-4 and weight decay 1e-4
+  - LR schedule: 1 epoch of linear warmup followed by cosine annealing
+  - Mixed precision (FP16) for faster training and lower memory usage
+  - Gradient clipping at norm 1.0 for stability
+  - Early stopping with patience of 4 epochs based on validation loss
+
+CROSS-VALIDATION
+We use blocked 5-fold cross-validation. Images are sorted by their ID
+and split into 5 contiguous blocks, ensuring temporally adjacent frames
+stay together. This prevents data leakage from near-duplicate frames
+ending up in both train and validation sets. Each fold trains an
+independent model, and the best checkpoint per fold is saved based on
+the lowest validation loss.
+
+To summarise the end-to-end flow:
+
+  Camera image
+    -> Resize to 320x240, normalise (+ augmentations if training)
+    -> EfficientNetV2-S backbone extracts a 1280-d feature vector
+    -> Shared head reduces to 256 dimensions
+    -> Angle head predicts steering via 17-bin soft classification
+    -> Speed head predicts speed via sigmoid
+
+Key design decisions and why they matter:
+  - Transfer learning with ImageNet pretraining gives the model a
+    strong starting point for visual feature extraction.
+  - Soft-binned angle prediction is more stable than direct regression
+    and lets the model express uncertainty.
+  - Heavy data augmentation and blocked cross-validation both help the
+    model generalise to unseen driving conditions.
+  - Sample weighting on the angle loss ensures the model pays attention
+    to the less frequent but more critical turning scenarios.
+
+

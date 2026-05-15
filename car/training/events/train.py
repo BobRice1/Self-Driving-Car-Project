@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train event classifier.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--task", type=str, default="arrow")
-    parser.add_argument("--out_dir", type=Path, default=Path("car/checkpoints"))
+    parser.add_argument("--out_dir", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--disable_amp", action="store_true")
@@ -198,7 +198,8 @@ def main() -> None:
     class_weights = torch.tensor(class_weights_np, dtype=torch.float32, device=device)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = args.out_dir / f"{args.task}_{timestamp}"
+    out_root = args.out_dir or Path(f"car/models/{args.task}/checkpoints")
+    out_dir = out_root / f"{args.task}_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")

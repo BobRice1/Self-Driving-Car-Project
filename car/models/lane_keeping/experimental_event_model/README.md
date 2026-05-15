@@ -1,6 +1,6 @@
 # Experimental Lane + Events Runtime
 
-This folder is a separate Pi deployment bundle for testing arrow and obstacle models without changing the current lane-only `NewModel/model.py`.
+This folder is a separate Pi deployment bundle for testing arrow and obstacle models without changing the current lane-only `car/models/lane_keeping/current/model.py`.
 
 ## Files to copy to the Pi
 

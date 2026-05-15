@@ -11,7 +11,7 @@ from train_lane_model import build_model
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a NewModel lane checkpoint on a CSV split.")
+    parser = argparse.ArgumentParser(description="Evaluate a lane keeping checkpoint on a CSV split.")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--csv", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=64)

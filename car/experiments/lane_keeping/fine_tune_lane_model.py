@@ -71,8 +71,8 @@ class FineTuneLaneDataset(Dataset):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune lane model checkpoints with figure-8 data.")
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--fig8-dir", type=Path, default=Path("NewModel/ensemble_model/8"))
-    parser.add_argument("--base-splits", type=Path, default=Path("NewModel/splits"))
+    parser.add_argument("--fig8-dir", type=Path, default=Path("car/data/lane_keeping/figure8"))
+    parser.add_argument("--base-splits", type=Path, default=Path("car/data/lane_keeping/splits"))
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=6)
     parser.add_argument("--batch-size", type=int, default=48)

@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare chunk-based lane keeping splits.")
     parser.add_argument("--csv-data", type=Path, default=Path("data"))
     parser.add_argument("--drive-frames", type=Path, default=Path("car/data/drive_frames"))
-    parser.add_argument("--out-dir", type=Path, default=Path("NewModel/splits"))
+    parser.add_argument("--out-dir", type=Path, default=Path("car/data/lane_keeping/splits"))
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--min-steering", type=float, default=ANGLE_MIN)
     parser.add_argument("--max-steering", type=float, default=ANGLE_MAX)

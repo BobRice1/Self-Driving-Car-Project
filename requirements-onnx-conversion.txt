@@ -1,0 +1,9 @@
+onnx
+onnx2tf
+tensorflow==2.15.*
+tf_keras==2.15.*
+onnx_graphsurgeon
+psutil
+ai-edge-litert[model-utils]==2.1.4
+sng4onnx
+opencv-python==4.11.0.86

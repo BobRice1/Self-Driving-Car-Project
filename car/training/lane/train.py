@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train lane-following model.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data_dir", type=Path, default=Path("data"))
-    parser.add_argument("--out_dir", type=Path, default=Path("car/checkpoints"))
+    parser.add_argument("--out_dir", type=Path, default=Path("car/models/lane/checkpoints"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--disable_amp", action="store_true")

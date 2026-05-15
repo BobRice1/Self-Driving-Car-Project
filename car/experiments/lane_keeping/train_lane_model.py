@@ -26,8 +26,8 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a compact lane keeping CNN.")
-    parser.add_argument("--splits-dir", type=Path, default=Path("NewModel/splits"))
-    parser.add_argument("--out-dir", type=Path, default=Path("NewModel/runs/lane_nvidia"))
+    parser.add_argument("--splits-dir", type=Path, default=Path("car/data/lane_keeping/splits"))
+    parser.add_argument("--out-dir", type=Path, default=Path("car/models/lane_keeping/runs/lane_nvidia"))
     parser.add_argument("--height", type=int, default=80)
     parser.add_argument("--width", type=int, default=160)
     parser.add_argument("--crop-top-ratio", type=float, default=0.35)

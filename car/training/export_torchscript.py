@@ -2,8 +2,8 @@
 Export trained PyTorch models to TorchScript for faster inference on the Pi.
 
 Usage:
-    python -m car.training.export_torchscript --type lane --checkpoint car/checkpoints/.../best.pt --output car/checkpoints/lane_best_ts.pt
-    python -m car.training.export_torchscript --type event --checkpoint car/checkpoints/.../best.pt --output car/checkpoints/arrow_best_ts.pt --num_classes 3 --input_size 96
+    python -m car.training.export_torchscript --type lane --checkpoint car/models/lane/checkpoints/.../best.pt --output car/models/lane/checkpoints/lane_best_ts.pt
+    python -m car.training.export_torchscript --type event --checkpoint car/models/arrow/checkpoints/.../best.pt --output car/models/arrow/checkpoints/arrow_best_ts.pt --num_classes 3 --input_size 96
 """
 from __future__ import annotations
 

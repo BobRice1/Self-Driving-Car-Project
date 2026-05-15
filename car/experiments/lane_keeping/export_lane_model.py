@@ -9,7 +9,7 @@ from train_lane_model import build_model
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export NewModel lane checkpoint.")
+    parser = argparse.ArgumentParser(description="Export lane keeping checkpoint.")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--onnx", type=Path, default=None)
     parser.add_argument("--tflite", type=Path, default=None)
